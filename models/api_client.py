@@ -1,16 +1,20 @@
 import requests
 import json
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Tuple
 import logging
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 class APIClient:
     """Класс для работы с API"""
-    def __init__(self, base_url: str = "http://localhost:8000", extension: str = "pharma", omsid: str = "", db=None):
+    def __init__(self, base_url: str = "http://localhost:8000", extension: str = "pharma", omsid: str = "", db=None, api_logger=None):
         self.base_url = base_url
         self.extension = extension
         self.omsid = omsid
         self.session = requests.Session()
         self.db = db  # Ссылка на базу данных для логирования
+        self.api_logger = api_logger
         self.is_api_available = False  # Статус доступности API
         
         # Словарь с русскоязычными описаниями методов API
@@ -211,28 +215,80 @@ class APIClient:
                         description = f"Запрос {method} {relative_url}"
                 
                 # Логирование для отладки
-                logger = logging.getLogger(__name__)
                 logger.debug(f"URL: {url}, Относительный URL: {relative_url}")
                 logger.debug(f"Метод: {method}, Ключ метода: {method_key}")
                 logger.debug(f"Проверяемые ключи: {possible_keys}")
                 logger.debug(f"Итоговое описание: {description}")
                 
+                # Проверяем наличие таблицы api_logs перед логированием
+                cursor = self.db.conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='api_logs'")
+                if not cursor.fetchone():
+                    logger.warning("Таблица api_logs не существует. Создаем таблицу...")
+                    cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS api_logs (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            method TEXT NOT NULL,
+                            url TEXT NOT NULL,
+                            request TEXT NOT NULL,
+                            response TEXT NOT NULL,
+                            status_code INTEGER,
+                            success INTEGER DEFAULT 1,
+                            description TEXT,
+                            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    ''')
+                    self.db.conn.commit()
+                    logger.info("Таблица api_logs создана")
+                
+                # Проверяем структуру таблицы
+                cursor.execute("PRAGMA table_info(api_logs)")
+                columns = [col["name"] for col in cursor.fetchall()]
+                required_columns = ["method", "url", "request", "response", "status_code", "success", "description", "timestamp"]
+                missing_columns = [col for col in required_columns if col not in columns]
+                if missing_columns:
+                    logger.warning(f"В таблице api_logs отсутствуют колонки: {missing_columns}")
+                    # Добавляем недостающие колонки
+                    for col in missing_columns:
+                        if col == "success":
+                            cursor.execute(f"ALTER TABLE api_logs ADD COLUMN {col} INTEGER DEFAULT 1")
+                        elif col == "timestamp":
+                            cursor.execute(f"ALTER TABLE api_logs ADD COLUMN {col} TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                        else:
+                            cursor.execute(f"ALTER TABLE api_logs ADD COLUMN {col} TEXT")
+                    self.db.conn.commit()
+                    logger.info(f"Добавлены недостающие колонки: {missing_columns}")
+                
                 # Логируем запрос
-                self.db.add_api_log(
-                    method=method,
-                    url=url,
-                    request=request_str,
-                    response=response_str,
-                    status_code=status_code,
-                    success=success,
-                    description=description
-                )
+                try:
+                    self.db.add_api_log(
+                        method=method,
+                        url=url,
+                        request=request_str,
+                        response=response_str,
+                        status_code=status_code,
+                        success=success,
+                        description=description
+                    )
+                    logger.info(f"Запрос {method} {url} успешно залогирован")
+                except Exception as e:
+                    logger.error(f"Ошибка при добавлении лога API: {str(e)}")
+                    # Попробуем упрощенный вариант
+                    try:
+                        cursor.execute(
+                            "INSERT INTO api_logs (method, url, request, response, status_code, success, description) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (method, url, request_str, response_str, status_code, 1 if success else 0, description)
+                        )
+                        self.db.conn.commit()
+                        logger.info("Запрос залогирован прямым SQL-запросом")
+                    except Exception as e2:
+                        logger.error(f"Повторная ошибка при логировании API: {str(e2)}")
                 
                 # Обновляем статус доступности API
                 self.is_api_available = success
                 
             except Exception as e:
-                print(f"Ошибка при логировании запроса: {str(e)}")
+                logger.error(f"Ошибка при логировании запроса: {str(e)}")
     
     def get_description_for_url(self, method, url):
         """Получение описания для метода и URL
@@ -448,48 +504,25 @@ class APIClient:
     def create_order(self, order_data: Dict[str, Any]) -> Dict[str, Any]:
         """Создание заказа на эмиссию кодов маркировки
         
-        Этот метод используется для создания и отправки заказа на эмиссию КМ.
-        Маркер безопасности (token) генерируется СУЗ при регистрации клиента СУЗ.
-        Маркер безопасности (token) передаётся на сервер в HTTP-заголовке с именем «clientToken».
-        
-        Примечания:
-        - Одна товарная позиция (КТ, GTIN) в одном заказе не должна превышать 150000 кодов маркировки
-        - Количество товарных позиций в одном заказе не должно превышать 10 (1 заказ - 10 GTIN)
-        - Для фармацевтической промышленности: 1 заказ – 1 GTIN
-        - Одновременно может быть не более 100 активных заказов
-        - В очереди также не может быть более 100 заказов
-        - Обращение к данному методу возможно не чаще 100 раз в секунду
-        
-        Параметры запроса:
-        - omsId: Уникальный идентификатор СУЗ (обязательный)
-        
-        Формат запроса для фармацевтической промышленности:
+        Формирует и отправляет запрос следующего вида:
         {
-          "products": [
-            {
-              "gtin": "01334567894339",
-              "quantity": 20,
-              "serialNumberType": "OPERATOR",
-              "templateId": 5
-            }
-          ],
-          "factoryId": "Identifier",
-          "factoryName": "Pharma Factory",
-          "factoryAddress": "Address",
-          "factoryCountry": "Country",
-          "productionLineId": "1",
-          "productCode": "6789",
-          "productDescription": "Simple",
-          "poNumber": "12345",
-          "expectedStartDate": "2019-03-01",
-          "releaseMethodType": "PRODUCTION",
-          "country": "KZ"
+            "products": [
+                {
+                    "gtin": "XXX",
+                    "quantity": XXX,
+                    "serialNumberType": "XXX",
+                    "templateId": XXX
+                }
+            ],
+            "factoryId": "XXX",
+            "releaseMethodType": "XXX",
+            "factoryCountry": "XXX"
         }
         
         Args:
-            order_data (Dict[str, Any]): Данные заказа в соответствии с форматом Order
-                Для фармы обязательны: products, factoryId, factoryCountry, releaseMethodType
-        
+            order_data (Dict[str, Any]): Данные заказа, которые должны содержать 
+                products, factoryId, releaseMethodType, factoryCountry
+                
         Returns:
             Dict[str, Any]: Результат создания заказа
             
@@ -506,19 +539,18 @@ class APIClient:
         if not self.omsid:
             raise ValueError("Отсутствует идентификатор СУЗ (omsId). Необходимо настроить учетные данные.")
         
-        # Проверка обязательных полей для фармацевтической промышленности
-        if self.extension == "pharma":
-            required_fields = ["products", "factoryId", "factoryCountry", "releaseMethodType"]
-            for field in required_fields:
-                if field not in order_data:
-                    raise ValueError(f"Отсутствует обязательное поле '{field}' для фармацевтической промышленности")
-            
-            # Проверка структуры products
-            if not isinstance(order_data.get("products"), list) or len(order_data.get("products", [])) != 1:
-                raise ValueError("Для фармацевтической промышленности должна быть ровно одна товарная позиция (GTIN)")
-            
-            # Проверка продукта
-            product = order_data["products"][0]
+        # Проверка обязательных полей
+        required_fields = ["products", "factoryId", "releaseMethodType", "factoryCountry"]
+        for field in required_fields:
+            if field not in order_data:
+                raise ValueError(f"Отсутствует обязательное поле '{field}'")
+        
+        # Проверка структуры products
+        if not isinstance(order_data.get("products"), list) or not order_data.get("products"):
+            raise ValueError("Должна быть хотя бы одна товарная позиция (GTIN)")
+        
+        # Проверка каждого продукта
+        for product in order_data["products"]:
             product_required_fields = ["gtin", "quantity", "serialNumberType", "templateId"]
             for field in product_required_fields:
                 if field not in product:
@@ -540,11 +572,11 @@ class APIClient:
             # Проверка serialNumbers для SELF_MADE
             if product["serialNumberType"] == "SELF_MADE" and "serialNumbers" not in product:
                 raise ValueError("Для типа серийного номера SELF_MADE требуется указать массив serialNumbers")
-            
-            # Проверка releaseMethodType
-            valid_release_methods = ["PRODUCTION", "IMPORT", "REMAINS", "CROSSBORDER", "COMMISSION", "DROPSHIPPING", "CONTRACTPRODUCTION", "FOREIGNDISTRIBUTION"]
-            if order_data["releaseMethodType"] not in valid_release_methods:
-                raise ValueError(f"Неверный тип метода выпуска. Допустимые значения: {', '.join(valid_release_methods)}")
+        
+        # Проверка releaseMethodType
+        valid_release_methods = ["PRODUCTION", "IMPORT", "REMAINS", "CROSSBORDER", "COMMISSION", "DROPSHIPPING", "CONTRACTPRODUCTION", "FOREIGNDISTRIBUTION"]
+        if order_data["releaseMethodType"] not in valid_release_methods:
+            raise ValueError(f"Неверный тип метода выпуска. Допустимые значения: {', '.join(valid_release_methods)}")
         
         # Для заказов строим URL с обязательным omsId
         url = f"{self.base_url}/api/v2/{self.extension}/orders?omsId={self.omsid}"
@@ -552,14 +584,21 @@ class APIClient:
         # Для заказов используем Content-Type: application/json
         headers['Content-Type'] = 'application/json;charset=UTF-8'
         
+        # Формируем тело запроса для создания заказа
+        request_body = {
+            "products": order_data["products"],
+            "factoryId": order_data["factoryId"],
+            "releaseMethodType": order_data["releaseMethodType"],
+            "factoryCountry": order_data["factoryCountry"]
+        }
+        
         # Логирование заголовков запроса для диагностики
-        logger = logging.getLogger(__name__)
         logger.info(f"Отправка заказа на эмиссию. URL: {url}")
         logger.info(f"Заголовки запроса: {headers}")
-        logger.info(f"Данные заказа: {order_data}")
+        logger.info(f"Данные заказа: {request_body}")
         
         try:
-            response = self.session.post(url, json=order_data, headers=headers)
+            response = self.session.post(url, json=request_body, headers=headers)
             
             # Логируем ответ для диагностики
             logger.info(f"Получен ответ от сервера. Статус: {response.status_code}")
@@ -570,7 +609,7 @@ class APIClient:
                     logger.info(f"Тело ответа не является JSON: {response.text[:200]}")
             
             # Логируем запрос в БД
-            self.log_request("POST", url, order_data, response)
+            self.log_request("POST", url, request_body, response)
             
             # Проверяем наличие ошибок в ответе
             json_response = response.json()
@@ -593,5 +632,171 @@ class APIClient:
         except requests.RequestException as e:
             error_message = f"Ошибка соединения при создании заказа: {str(e)}"
             logger.error(error_message)
-            self.log_request("POST", url, order_data, None)
-            raise 
+            self.log_request("POST", url, request_body, None)
+            raise
+
+    def request(self, method: str, url: str, data: Any = None, headers: Optional[Dict[str, str]] = None, 
+                params: Optional[Dict[str, str]] = None, timeout: int = 30, 
+                description: Optional[str] = None) -> Tuple[bool, Dict[str, Any], int]:
+        """
+        Выполняет HTTP запрос к API и логирует результат.
+        
+        Args:
+            method (str): HTTP метод (GET, POST, PUT, DELETE и т.д.)
+            url (str): URL для запроса (полный или относительный путь)
+            data (Any, optional): Данные для отправки в запросе
+            headers (Dict[str, str], optional): Заголовки запроса
+            params (Dict[str, str], optional): Параметры URL-запроса
+            timeout (int, optional): Таймаут запроса в секундах
+            description (str, optional): Описание запроса для логирования
+            
+        Returns:
+            Tuple[bool, Dict[str, Any], int]: Кортеж (успех, данные ответа, код статуса)
+        """
+        # Формирование полного URL, если передан относительный путь
+        if not url.startswith('http'):
+            url = f"{self.base_url}{url}"
+        
+        # Заголовки по умолчанию
+        default_headers = self.get_headers()
+        
+        # Объединение заголовков по умолчанию с переданными заголовками
+        if headers:
+            request_headers = {**default_headers, **headers}
+        else:
+            request_headers = default_headers
+        
+        try:
+            # Выполнение запроса
+            response = self.session.request(
+                method=method,
+                url=url,
+                data=data,
+                headers=request_headers,
+                params=params,
+                timeout=timeout
+            )
+            
+            # Логирование запроса в базу данных
+            if self.db:
+                self.log_request(method, url, data, response, description)
+            
+            # Логирование запроса через api_logger, если он доступен
+            if self.api_logger:
+                # Преобразование request_data и response_data в формат JSON, если это возможно
+                request_data = data
+                try:
+                    response_data = response.json() if response.content else {}
+                except ValueError:
+                    response_data = {"raw_content": str(response.content)}
+                
+                # Логирование через APILog
+                self.api_logger.log_request(
+                    method=method,
+                    url=url,
+                    request_data=json.dumps(request_data) if request_data else "{}",
+                    response_data=json.dumps(response_data) if response_data else "{}",
+                    status_code=response.status_code,
+                    success=200 <= response.status_code < 300,
+                    description=description
+                )
+            
+            # Попытка получить данные JSON из ответа
+            try:
+                response_data = response.json()
+            except ValueError:
+                response_data = {"content": str(response.content)}
+            
+            # Определение успешности запроса на основе кода статуса
+            success = 200 <= response.status_code < 300
+            
+            return success, response_data, response.status_code
+            
+        except requests.RequestException as e:
+            # Обработка ошибок запроса
+            error_message = str(e)
+            error_data = {"error": error_message}
+            
+            # Логирование ошибки
+            logger.error(f"Ошибка API запроса: {error_message}")
+            
+            # Логирование через api_logger при ошибке
+            if self.api_logger:
+                self.api_logger.log_request(
+                    method=method,
+                    url=url,
+                    request_data=json.dumps(data) if data else "{}",
+                    response_data=json.dumps(error_data),
+                    status_code=0,  # Код 0 для ошибок подключения
+                    success=False,
+                    description=f"{description} (Ошибка: {error_message})" if description else f"Ошибка запроса: {error_message}"
+                )
+            
+            return False, error_data, 0
+    
+    def get(self, url: str, params: Optional[Dict] = None, headers: Optional[Dict] = None, 
+            description: str = "") -> Tuple[Dict, int]:
+        """
+        Выполнение GET-запроса
+        
+        Args:
+            url: URL-адрес для запроса
+            params: Параметры URL-строки запроса
+            headers: Дополнительные заголовки
+            description: Описание запроса для логирования
+            
+        Returns:
+            Tuple[Dict, int]: Ответ сервера и код ответа
+        """
+        return self.request("GET", url, params=params, headers=headers, description=description)
+    
+    def post(self, url: str, data: Dict, params: Optional[Dict] = None, 
+             headers: Optional[Dict] = None, description: str = "") -> Tuple[Dict, int]:
+        """
+        Выполнение POST-запроса
+        
+        Args:
+            url: URL-адрес для запроса
+            data: Данные для отправки в запросе
+            params: Параметры URL-строки запроса
+            headers: Дополнительные заголовки
+            description: Описание запроса для логирования
+            
+        Returns:
+            Tuple[Dict, int]: Ответ сервера и код ответа
+        """
+        return self.request("POST", url, data=data, params=params, headers=headers, description=description)
+    
+    def put(self, url: str, data: Dict, params: Optional[Dict] = None, 
+            headers: Optional[Dict] = None, description: str = "") -> Tuple[Dict, int]:
+        """
+        Выполнение PUT-запроса
+        
+        Args:
+            url: URL-адрес для запроса
+            data: Данные для отправки в запросе
+            params: Параметры URL-строки запроса
+            headers: Дополнительные заголовки
+            description: Описание запроса для логирования
+            
+        Returns:
+            Tuple[Dict, int]: Ответ сервера и код ответа
+        """
+        return self.request("PUT", url, data=data, params=params, headers=headers, description=description)
+    
+    def delete(self, url: str, data: Optional[Dict] = None, params: Optional[Dict] = None, 
+               headers: Optional[Dict] = None, description: str = "") -> Tuple[Dict, int]:
+        """
+        Выполнение DELETE-запроса
+        
+        Args:
+            url: URL-адрес для запроса
+            data: Данные для отправки в запросе
+            params: Параметры URL-строки запроса
+            headers: Дополнительные заголовки
+            description: Описание запроса для логирования
+            
+        Returns:
+            Tuple[Dict, int]: Ответ сервера и код ответа
+        """
+        return self.request("DELETE", url, data=data, params=params, headers=headers, description=description) 

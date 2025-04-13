@@ -17,10 +17,21 @@ class OrderORM(Base):
     __tablename__ = 'orders'
     
     id = Column(Integer, primary_key=True)
-    order_number = Column(String)
-    status = Column(String)
+    order_number = Column(String, nullable=False)
+    timestamp = Column(String)
+    expected_complete = Column(String)
+    status = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class OrderProductORM(Base):
+    """Модель деталей заказа (товаров) в SQLAlchemy"""
+    __tablename__ = 'order_products'
+    
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey('orders.id'))
+    gtin = Column(String, nullable=False)
+    quantity = Column(Integer, nullable=False)
+    order = relationship("OrderORM")
 
 class AggregationORM(Base):
     """Модель агрегации в SQLAlchemy"""
@@ -49,8 +60,7 @@ class CredentialsORM(Base):
     id = Column(Integer, primary_key=True)
     omsid = Column(String, nullable=False)
     token = Column(String, nullable=False)
-    connection_id = Column(Integer, ForeignKey('connections.id'))
-    connection = relationship("ConnectionORM")
+    gln = Column(String, default='')
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -118,8 +128,21 @@ class Database:
             CREATE TABLE IF NOT EXISTS orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 order_number TEXT NOT NULL,
+                timestamp TEXT,
+                expected_complete TEXT,
                 status TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Таблица деталей заказа (товаров)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS order_products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER,
+                gtin TEXT NOT NULL,
+                quantity INTEGER NOT NULL,
+                FOREIGN KEY (order_id) REFERENCES orders (id)
             )
         ''')
         
@@ -139,8 +162,7 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 omsid TEXT NOT NULL,
                 token TEXT NOT NULL,
-                connection_id INTEGER NULL,
-                FOREIGN KEY (connection_id) REFERENCES connections (id)
+                gln TEXT DEFAULT ''
             )
         ''')
         
@@ -216,7 +238,7 @@ class Database:
         """Миграция базы данных - добавление новых полей в существующие таблицы"""
         cursor = self.conn.cursor()
         
-        # Проверяем, есть ли колонка product_group в таблице nomenclature
+        # Проверяем и добавляем столбец product_group в таблицу nomenclature
         cursor.execute("PRAGMA table_info(nomenclature)")
         columns = cursor.fetchall()
         column_names = [column["name"] for column in columns]
@@ -228,21 +250,85 @@ class Database:
                 self.conn.commit()
                 logger.info("Добавлена колонка product_group в таблицу nomenclature")
             except Exception as e:
-                logger.error(f"Ошибка при добавлении колонки product_group: {str(e)}")
+                logger.error(f"Ошибка при миграции базы данных: {str(e)}")
         
-        # Проверяем, есть ли колонка description в таблице api_logs
-        cursor.execute("PRAGMA table_info(api_logs)")
+        # Проверяем и добавляем столбец gln в таблицу credentials
+        cursor.execute("PRAGMA table_info(credentials)")
         columns = cursor.fetchall()
         column_names = [column["name"] for column in columns]
         
         # Если колонки нет, добавляем её
-        if "description" not in column_names:
+        if "gln" not in column_names:
             try:
-                cursor.execute("ALTER TABLE api_logs ADD COLUMN description TEXT")
+                cursor.execute("ALTER TABLE credentials ADD COLUMN gln TEXT DEFAULT ''")
                 self.conn.commit()
-                logger.info("Добавлена колонка description в таблицу api_logs")
+                logger.info("Добавлена колонка gln в таблицу credentials")
             except Exception as e:
-                logger.error(f"Ошибка при добавлении колонки description: {str(e)}")
+                logger.error(f"Ошибка при миграции базы данных: {str(e)}")
+                
+        # Проверяем и добавляем столбец timestamp в таблицу orders
+        cursor.execute("PRAGMA table_info(orders)")
+        columns = cursor.fetchall()
+        column_names = [column["name"] for column in columns]
+        
+        # Если колонки нет, добавляем её
+        if "timestamp" not in column_names:
+            try:
+                cursor.execute("ALTER TABLE orders ADD COLUMN timestamp TEXT")
+                self.conn.commit()
+                logger.info("Добавлена колонка timestamp в таблицу orders")
+            except Exception as e:
+                logger.error(f"Ошибка при миграции базы данных: {str(e)}")
+        
+        # Проверяем и добавляем столбец expected_complete в таблицу orders
+        if "expected_complete" not in column_names:
+            try:
+                cursor.execute("ALTER TABLE orders ADD COLUMN expected_complete TEXT")
+                self.conn.commit()
+                logger.info("Добавлена колонка expected_complete в таблицу orders")
+            except Exception as e:
+                logger.error(f"Ошибка при миграции базы данных: {str(e)}")
+        else:
+            # Проверяем тип колонки expected_complete и при необходимости мигрируем данные
+            try:
+                # Проверяем, есть ли записи с числовыми значениями
+                cursor.execute("SELECT id, expected_complete FROM orders WHERE expected_complete IS NOT NULL AND expected_complete != ''")
+                rows = cursor.fetchall()
+                
+                for row in rows:
+                    order_id = row[0]
+                    expected_complete_value = row[1]
+                    
+                    # Проверяем, является ли значение числом
+                    try:
+                        minutes = int(expected_complete_value)
+                        # Если это число минут, преобразуем в строку даты
+                        # Предполагаем, что это минуты с момента создания заказа
+                        cursor.execute("SELECT created_at FROM orders WHERE id = ?", (order_id,))
+                        created_at_row = cursor.fetchone()
+                        
+                        if created_at_row:
+                            try:
+                                created_at = datetime.strptime(created_at_row[0], "%Y-%m-%d %H:%M:%S")
+                                # Добавляем указанное количество минут
+                                expected_time = created_at.timestamp() + (minutes * 60)
+                                expected_date = datetime.fromtimestamp(expected_time)
+                                formatted_date = expected_date.strftime("%Y-%m-%d %H:%M:%S")
+                                
+                                # Обновляем значение в базе данных
+                                cursor.execute("UPDATE orders SET expected_complete = ? WHERE id = ?", 
+                                              (formatted_date, order_id))
+                                logger.info(f"Мигрирован формат даты для заказа {order_id}")
+                            except Exception as e:
+                                logger.error(f"Ошибка при преобразовании даты для заказа {order_id}: {str(e)}")
+                    except ValueError:
+                        # Если это не число, ничего не делаем
+                        pass
+                
+                self.conn.commit()
+                logger.info("Миграция данных expected_complete завершена")
+            except Exception as e:
+                logger.error(f"Ошибка при миграции данных expected_complete: {str(e)}")
     
     def insert_default_extensions(self):
         """Вставка значений расширений по умолчанию, если таблица пуста"""
@@ -565,12 +651,12 @@ class Database:
             logger.info("Значения стран мира по умолчанию добавлены")
     
     # Методы для работы с заказами
-    def add_order(self, order_number: str, status: str) -> Order:
+    def add_order(self, order_number: str, timestamp: str = None, expected_complete: int = None, status: str = "Не определен") -> Order:
         """Добавление заказа в базу данных"""
         cursor = self.conn.cursor()
         cursor.execute(
-            "INSERT INTO orders (order_number, status) VALUES (?, ?)",
-            (order_number, status)
+            "INSERT INTO orders (order_number, timestamp, expected_complete, status) VALUES (?, ?, ?, ?)",
+            (order_number, timestamp, expected_complete, status)
         )
         self.conn.commit()
         
@@ -579,14 +665,42 @@ class Database:
             (cursor.lastrowid,)
         )
         row = cursor.fetchone()
-        return Order(row["id"], row["order_number"], row["status"], row["created_at"])
+        return Order(row["id"], row["order_number"], row["timestamp"], row["expected_complete"], row["status"], row["created_at"])
     
     def get_orders(self) -> List[Order]:
         """Получение списка заказов из базы данных"""
         cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM orders ORDER BY created_at DESC")
+        cursor.execute("SELECT * FROM orders ORDER BY id DESC")
         rows = cursor.fetchall()
-        return [Order(row["id"], row["order_number"], row["status"], row["created_at"]) for row in rows]
+        return [Order(row["id"], row["order_number"], row["timestamp"], row["expected_complete"], row["status"], row["created_at"]) for row in rows]
+    
+    def add_order_product(self, order_id: int, gtin: str, quantity: int) -> Dict[str, Any]:
+        """Добавление товара в заказ"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "INSERT INTO order_products (order_id, gtin, quantity) VALUES (?, ?, ?)",
+            (order_id, gtin, quantity)
+        )
+        self.conn.commit()
+        
+        cursor.execute(
+            "SELECT * FROM order_products WHERE id = ?",
+            (cursor.lastrowid,)
+        )
+        row = cursor.fetchone()
+        return dict(row)
+    
+    def get_order_products(self, order_id: int) -> List[Dict[str, Any]]:
+        """Получение товаров заказа"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT op.*, n.name as product_name FROM order_products op " +
+            "LEFT JOIN nomenclature n ON op.gtin = n.gtin " +
+            "WHERE op.order_id = ?",
+            (order_id,)
+        )
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
     
     # Методы для работы с подключениями
     def add_connection(self, name: str, url: str) -> Connection:
@@ -671,42 +785,63 @@ class Database:
         self.conn.commit()
     
     # Методы для работы с учетными данными
-    def add_credentials(self, omsid: str, token: str, connection_id: Optional[int] = None) -> Credentials:
-        """Добавление учетных данных в базу данных"""
+    def add_credentials(self, omsid: str, token: str, gln: str, connection_id: int = None) -> Credentials:
+        """Добавление новых учетных данных
+        
+        Args:
+            omsid: OMS ID
+            token: Токен
+            gln: GLN
+            connection_id: ID подключения (опционально)
+            
+        Returns:
+            Credentials: Объект учетных данных
+        """
         cursor = self.conn.cursor()
         cursor.execute(
-            "INSERT INTO credentials (omsid, token, connection_id) VALUES (?, ?, ?)",
-            (omsid, token, connection_id)
+            "INSERT INTO credentials (omsid, token, gln) VALUES (?, ?, ?)",
+            (omsid, token, gln)
         )
         self.conn.commit()
+        credentials_id = cursor.lastrowid
         
-        cursor.execute(
-            "SELECT c.* FROM credentials c WHERE c.id = ?",
-            (cursor.lastrowid,)
-        )
-        row = cursor.fetchone()
-        
-        # Получаем информацию о подключении, если указан connection_id
-        connection = None
+        # Если указан connection_id, связываем учетные данные с подключением
         if connection_id:
-            conn_cursor = self.conn.cursor()
-            conn_cursor.execute(
-                "SELECT * FROM connections WHERE id = ?",
-                (connection_id,)
-            )
-            conn_row = conn_cursor.fetchone()
-            if conn_row:
-                connection = Connection(conn_row["id"], conn_row["name"], 
-                                        conn_row["url"], bool(conn_row["is_active"]))
+            try:
+                cursor.execute(
+                    "INSERT INTO credential_connections (credential_id, connection_id) VALUES (?, ?)",
+                    (credentials_id, connection_id)
+                )
+                self.conn.commit()
+            except sqlite3.Error as e:
+                # Если таблицы связей нет, создаем ее
+                if "no such table" in str(e):
+                    cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS credential_connections (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            credential_id INTEGER,
+                            connection_id INTEGER,
+                            FOREIGN KEY (credential_id) REFERENCES credentials (id),
+                            FOREIGN KEY (connection_id) REFERENCES connections (id)
+                        )
+                    ''')
+                    self.conn.commit()
+                    # И пробуем снова вставить запись
+                    cursor.execute(
+                        "INSERT INTO credential_connections (credential_id, connection_id) VALUES (?, ?)",
+                        (credentials_id, connection_id)
+                    )
+                    self.conn.commit()
         
-        return Credentials(row["id"], row["omsid"], row["token"], connection)
+        # Возвращаем объект учетных данных
+        return Credentials(id=credentials_id, omsid=omsid, token=token, gln=gln)
     
-    def update_credentials(self, credentials_id: int, omsid: str, token: str) -> Credentials:
+    def update_credentials(self, credentials_id: int, omsid: str, token: str, gln: str) -> Credentials:
         """Обновление учетных данных в базе данных"""
         cursor = self.conn.cursor()
         cursor.execute(
-            "UPDATE credentials SET omsid = ?, token = ? WHERE id = ?",
-            (omsid, token, credentials_id)
+            "UPDATE credentials SET omsid = ?, token = ?, gln = ? WHERE id = ?",
+            (omsid, token, gln, credentials_id)
         )
         self.conn.commit()
         
@@ -716,20 +851,7 @@ class Database:
         )
         row = cursor.fetchone()
         
-        # Получаем информацию о подключении, если указан connection_id
-        connection = None
-        if row["connection_id"]:
-            conn_cursor = self.conn.cursor()
-            conn_cursor.execute(
-                "SELECT * FROM connections WHERE id = ?",
-                (row["connection_id"],)
-            )
-            conn_row = conn_cursor.fetchone()
-            if conn_row:
-                connection = Connection(conn_row["id"], conn_row["name"], 
-                                        conn_row["url"], bool(conn_row["is_active"]))
-        
-        return Credentials(row["id"], row["omsid"], row["token"], connection)
+        return Credentials(row["id"], row["omsid"], row["token"], row["gln"])
     
     def delete_credentials(self, credentials_id: int) -> None:
         """Удаление учетных данных из базы данных"""
@@ -747,16 +869,8 @@ class Database:
         rows = cursor.fetchall()
         result = []
         
-        # Получаем все подключения одним запросом для оптимизации
-        conn_cursor = self.conn.cursor()
-        conn_cursor.execute("SELECT * FROM connections")
-        connections = {row["id"]: Connection(row["id"], row["name"], row["url"], bool(row["is_active"])) 
-                      for row in conn_cursor.fetchall()}
-        
         for row in rows:
-            # Находим подключение, если оно указано
-            connection = connections.get(row["connection_id"]) if row["connection_id"] else None
-            credentials = Credentials(row["id"], row["omsid"], row["token"], connection)
+            credentials = Credentials(row["id"], row["omsid"], row["token"], row["gln"])
             result.append(credentials)
         
         return result
@@ -768,20 +882,7 @@ class Database:
         row = cursor.fetchone()
         
         if row:
-            # Получаем информацию о подключении, если указан connection_id
-            connection = None
-            if row["connection_id"]:
-                conn_cursor = self.conn.cursor()
-                conn_cursor.execute(
-                    "SELECT * FROM connections WHERE id = ?",
-                    (row["connection_id"],)
-                )
-                conn_row = conn_cursor.fetchone()
-                if conn_row:
-                    connection = Connection(conn_row["id"], conn_row["name"], 
-                                           conn_row["url"], bool(conn_row["is_active"]))
-            
-            return Credentials(row["id"], row["omsid"], row["token"], connection)
+            return Credentials(row["id"], row["omsid"], row["token"], row["gln"])
         
         return None
     
@@ -791,18 +892,9 @@ class Database:
         cursor.execute("SELECT * FROM credentials WHERE connection_id = ?", (connection_id,))
         rows = cursor.fetchall()
         
-        # Получаем подключение
-        conn_cursor = self.conn.cursor()
-        conn_cursor.execute("SELECT * FROM connections WHERE id = ?", (connection_id,))
-        conn_row = conn_cursor.fetchone()
-        connection = None
-        if conn_row:
-            connection = Connection(conn_row["id"], conn_row["name"], 
-                                   conn_row["url"], bool(conn_row["is_active"]))
-        
         result = []
         for row in rows:
-            credentials = Credentials(row["id"], row["omsid"], row["token"], connection)
+            credentials = Credentials(row["id"], row["omsid"], row["token"], row["gln"])
             result.append(credentials)
         
         return result
@@ -950,13 +1042,37 @@ class Database:
             "timestamp": row["timestamp"]
         }
     
-    def get_api_logs(self, limit=100, offset=0):
-        """Получение списка логов API-запросов"""
+    def get_api_logs(self, limit=100, offset=0, success=None, method=None, url_pattern=None, date_from=None, date_to=None):
+        """Получение списка логов API-запросов с фильтрацией"""
         cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT * FROM api_logs ORDER BY timestamp DESC LIMIT ? OFFSET ?",
-            (limit, offset)
-        )
+        
+        query = "SELECT * FROM api_logs WHERE 1=1"
+        params = []
+        
+        if success is not None:
+            query += " AND success = ?"
+            params.append(1 if success else 0)
+            
+        if method is not None:
+            query += " AND method = ?"
+            params.append(method)
+            
+        if url_pattern is not None:
+            query += " AND url LIKE ?"
+            params.append(f"%{url_pattern}%")
+            
+        if date_from is not None:
+            query += " AND timestamp >= ?"
+            params.append(date_from.isoformat())
+            
+        if date_to is not None:
+            query += " AND timestamp <= ?"
+            params.append(date_to.isoformat())
+            
+        query += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        
+        cursor.execute(query, params)
         rows = cursor.fetchall()
         result = []
         for row in rows:
@@ -977,29 +1093,135 @@ class Database:
         return result
     
     def get_api_log_by_id(self, log_id):
-        """Получение лога API-запроса по ID"""
+        """Получение записи лога API-запроса по ID"""
         cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT * FROM api_logs WHERE id = ?",
-            (log_id,)
-        )
+        cursor.execute("SELECT * FROM api_logs WHERE id = ?", (log_id,))
         row = cursor.fetchone()
-        if row:
-            log_entry = {
-                "id": row["id"],
+        
+        if not row:
+            return None
+            
+        log_entry = {
+            "id": row["id"],
+            "method": row["method"],
+            "url": row["url"],
+            "request": row["request"],
+            "response": row["response"],
+            "status_code": row["status_code"],
+            "success": bool(row["success"]),
+            "timestamp": row["timestamp"]
+        }
+        
+        # Добавляем поле description, если оно есть
+        if "description" in row.keys():
+            log_entry["description"] = row["description"]
+            
+        return log_entry
+    
+    def count_api_logs(self, date_from=None, success=None):
+        """Подсчет количества логов API-запросов"""
+        cursor = self.conn.cursor()
+        
+        query = "SELECT COUNT(*) as count FROM api_logs WHERE 1=1"
+        params = []
+        
+        if success is not None:
+            query += " AND success = ?"
+            params.append(1 if success else 0)
+            
+        if date_from is not None:
+            query += " AND timestamp >= ?"
+            params.append(date_from.isoformat())
+            
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        return row["count"] if row else 0
+        
+    def get_method_stats(self, date_from=None):
+        """Получение статистики по HTTP-методам"""
+        cursor = self.conn.cursor()
+        
+        query = """
+            SELECT method, COUNT(*) as count, 
+            SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as success_count,
+            SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as fail_count
+            FROM api_logs 
+            WHERE 1=1
+        """
+        params = []
+        
+        if date_from is not None:
+            query += " AND timestamp >= ?"
+            params.append(date_from.isoformat())
+            
+        query += " GROUP BY method"
+        
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        result = []
+        
+        for row in rows:
+            result.append({
                 "method": row["method"],
+                "count": row["count"],
+                "success_count": row["success_count"],
+                "fail_count": row["fail_count"],
+                "success_rate": (row["success_count"] / row["count"] * 100) if row["count"] > 0 else 0
+            })
+            
+        return result
+        
+    def get_url_stats(self, date_from=None):
+        """Получение статистики по URL"""
+        cursor = self.conn.cursor()
+        
+        query = """
+            SELECT url, COUNT(*) as count, 
+            SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as success_count,
+            SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as fail_count
+            FROM api_logs 
+            WHERE 1=1
+        """
+        params = []
+        
+        if date_from is not None:
+            query += " AND timestamp >= ?"
+            params.append(date_from.isoformat())
+            
+        query += " GROUP BY url"
+        
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        result = []
+        
+        for row in rows:
+            result.append({
                 "url": row["url"],
-                "request": row["request"],
-                "response": row["response"],
-                "status_code": row["status_code"],
-                "success": bool(row["success"]),
-                "timestamp": row["timestamp"]
-            }
-            # Добавляем поле description, если оно есть
-            if "description" in row.keys():
-                log_entry["description"] = row["description"]
-            return log_entry
-        return None
+                "count": row["count"],
+                "success_count": row["success_count"],
+                "fail_count": row["fail_count"],
+                "success_rate": (row["success_count"] / row["count"] * 100) if row["count"] > 0 else 0
+            })
+            
+        return result
+        
+    def delete_api_logs_by_ids(self, log_ids):
+        """Удаление логов API-запросов по ID"""
+        if not log_ids:
+            return 0
+            
+        cursor = self.conn.cursor()
+        placeholders = ','.join(['?' for _ in log_ids])
+        cursor.execute(f"DELETE FROM api_logs WHERE id IN ({placeholders})", log_ids)
+        self.conn.commit()
+        return cursor.rowcount
+        
+    def delete_api_logs_before_date(self, before_date):
+        """Удаление логов API-запросов до указанной даты"""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM api_logs WHERE timestamp < ?", (before_date.isoformat(),))
+        self.conn.commit()
+        return cursor.rowcount
     
     def get_emission_types(self) -> List[EmissionType]:
         """Получение всех типов эмиссии"""

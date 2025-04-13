@@ -4,6 +4,7 @@ from PyQt6.QtWidgets import QApplication, QMessageBox
 from views.main_window import MainWindow
 from models.database import Database
 from models.api_client import APIClient
+from models.api_log import APILog
 from controllers.main_controller import MainController
 
 # Настройка логирования
@@ -24,14 +25,17 @@ def main():
         # Создание базы данных
         db = Database()
         
-        # Создание API-клиента с передачей базы данных для логирования
-        api_client = APIClient(db=db)
+        # Создание объекта логирования API
+        api_logger = APILog(db=db)
+        
+        # Создание API-клиента с передачей логгера для логирования
+        api_client = APIClient(db=db, api_logger=api_logger)
         
         # Создание главного окна
         view = MainWindow()
         
-        # Создание контроллера
-        controller = MainController(view, db, api_client)
+        # Создание контроллера с передачей логгера API
+        controller = MainController(view, db, api_client, api_logger)
         
         # Отображение главного окна
         view.show()

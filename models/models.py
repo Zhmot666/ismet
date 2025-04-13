@@ -4,9 +4,11 @@ from datetime import datetime
 
 class Order:
     """Класс для представления заказа"""
-    def __init__(self, id, order_number, status, created_at):
+    def __init__(self, id, order_number, timestamp=None, expected_complete=None, status="Не определен", created_at=None):
         self.id = id
         self.order_number = order_number
+        self.timestamp = timestamp
+        self.expected_complete = expected_complete
         self.status = status
         self.created_at = created_at
 
@@ -20,11 +22,11 @@ class Connection:
 
 class Credentials:
     """Класс для представления учетных данных"""
-    def __init__(self, id, omsid, token, connection=None):
+    def __init__(self, id, omsid, token, gln=""):
         self.id = id
         self.omsid = omsid
         self.token = token
-        self.connection = connection  # Необязательное поле, для обратной совместимости
+        self.gln = gln
 
 class Nomenclature:
     """Класс для представления номенклатуры"""

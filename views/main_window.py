@@ -1,8 +1,8 @@
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                             QPushButton, QLabel, QTableWidget, QTableWidgetItem,
-                            QMessageBox, QLineEdit, QComboBox, QTabWidget, QSplitter, QTextEdit)
+                            QMessageBox, QLineEdit, QComboBox, QTabWidget, QSplitter, QTextEdit, QDialog, QDialogButtonBox, QInputDialog)
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QIntValidator
 from .dialogs import ConnectionDialog, CredentialsDialog, NomenclatureDialog
 import logging
 import datetime
@@ -21,6 +21,7 @@ class MainWindow(QMainWindow):
     get_version_signal = pyqtSignal()  # Сигнал для запроса версии СУЗ и API
     get_orders_status_signal = pyqtSignal()  # Сигнал для получения статуса заказов
     create_emission_order_signal = pyqtSignal(dict)  # Сигнал для создания заказа на эмиссию кодов
+    get_order_details_signal = pyqtSignal(int)  # Сигнал для получения деталей заказа
     
     # Сигналы для работы с подключениями
     add_connection_signal = pyqtSignal(str, str)
@@ -29,8 +30,8 @@ class MainWindow(QMainWindow):
     set_active_connection_signal = pyqtSignal(int)
     
     # Сигналы для работы с учетными данными
-    add_credentials_signal = pyqtSignal(str, str, int)
-    edit_credentials_signal = pyqtSignal(int, str, str)
+    add_credentials_signal = pyqtSignal(str, str, str, str)  # omsid, token, gln, connection_id
+    edit_credentials_signal = pyqtSignal(int, str, str, str)  # id, omsid, token, gln
     delete_credentials_signal = pyqtSignal(int)
     
     # Сигналы для работы с номенклатурой
@@ -78,6 +79,19 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.extensions_tab, "Виды продукции")
         self.tabs.addTab(self.api_logs_tab, "Логи API")
         self.tabs.addTab(self.countries_tab, "Страны")
+        
+        # Создаем панель кнопок для вызова модальных окон
+        toolbar = self.addToolBar("Панель инструментов")
+        
+        # Кнопка справочников
+        catalogs_button = QPushButton("Справочники")
+        catalogs_button.clicked.connect(self.show_catalogs_dialog)
+        toolbar.addWidget(catalogs_button)
+        
+        # Кнопка настроек
+        settings_button = QPushButton("Настройки")
+        settings_button.clicked.connect(self.show_settings_dialog)
+        toolbar.addWidget(settings_button)
     
     def create_status_bar(self):
         """Создание строки статуса с индикатором доступности API"""
@@ -268,20 +282,20 @@ class MainWindow(QMainWindow):
         self.api_logs_table.resizeColumnsToContents()
     
     def create_extensions_tab(self):
-        """Создание вкладки видов продукции (расширений API)"""
+        """Создание вкладки для работы с расширениями API"""
         self.extensions_tab = QWidget()
         layout = QVBoxLayout(self.extensions_tab)
         
         # Таблица расширений
         self.extensions_table = QTableWidget()
-        self.extensions_table.setColumnCount(4)
-        self.extensions_table.setHorizontalHeaderLabels(["ID", "Код", "Наименование", "Активно"])
+        self.extensions_table.setColumnCount(3)
+        self.extensions_table.setHorizontalHeaderLabels(["ID", "Название", "Активный"])
         layout.addWidget(self.extensions_table)
         
-        # Кнопки для работы с расширениями
+        # Кнопки управления расширениями
         buttons_layout = QHBoxLayout()
         
-        set_active_button = QPushButton("Сделать активным")
+        set_active_button = QPushButton("Установить активным")
         set_active_button.clicked.connect(self.on_set_active_extension_clicked)
         buttons_layout.addWidget(set_active_button)
         
@@ -301,20 +315,31 @@ class MainWindow(QMainWindow):
         self.extensions_table.setRowCount(len(extensions))
         for row, extension in enumerate(extensions):
             self.extensions_table.setItem(row, 0, QTableWidgetItem(str(extension.id)))
-            self.extensions_table.setItem(row, 1, QTableWidgetItem(extension.code))
-            self.extensions_table.setItem(row, 2, QTableWidgetItem(extension.name))
-            self.extensions_table.setItem(row, 3, QTableWidgetItem("Да" if extension.is_active else "Нет"))
+            self.extensions_table.setItem(row, 1, QTableWidgetItem(extension.name))
+            self.extensions_table.setItem(row, 2, QTableWidgetItem("Да" if extension.is_active else "Нет"))
     
     def on_add_order_clicked(self):
-        """Обработчик нажатия кнопки добавления заказа"""
-        order_number = self.order_number_input.text()
-        status = self.order_status_input.text()
-        if order_number and status:
-            self.add_order_signal.emit(order_number, status)
-            self.order_number_input.clear()
-            self.order_status_input.clear()
+        """Обработчик нажатия на кнопку добавления заказа"""
+        from PyQt6.QtWidgets import QInputDialog, QLineEdit, QMessageBox
+        
+        # Запрашиваем номер заказа через диалоговое окно
+        order_number, ok = QInputDialog.getText(
+            self, "Добавление заказа", "Введите номер заказа:", QLineEdit.EchoMode.Normal
+        )
+        
+        if ok and order_number:
+            # Запрашиваем статус заказа
+            status, ok = QInputDialog.getText(
+                self, "Добавление заказа", "Введите статус заказа:", QLineEdit.EchoMode.Normal
+            )
+            
+            if ok and status:
+                # Вызываем сигнал добавления заказа
+                self.add_order_signal.emit(order_number, status)
+            else:
+                QMessageBox.warning(self, "Предупреждение", "Статус заказа не указан")
         else:
-            QMessageBox.warning(self, "Ошибка", "Заполните все поля")
+            QMessageBox.warning(self, "Предупреждение", "Номер заказа не указан")
     
     def on_ping_clicked(self):
         """Обработчик нажатия кнопки проверки API"""
@@ -393,35 +418,58 @@ class MainWindow(QMainWindow):
                 connection_id = int(self.connections_table.item(row, 0).text())
             
             # Теперь connection_id необязательный параметр
-            self.add_credentials_signal.emit(data['omsid'], data['token'], connection_id)
+            self.add_credentials_signal.emit(data['omsid'], data['token'], data['gln'], connection_id)
     
     def on_edit_credentials_clicked(self):
         """Обработчик нажатия кнопки редактирования учетных данных"""
-        row = self.credentials_table.currentRow()
-        if row >= 0:
-            credentials_id = int(self.credentials_table.item(row, 0).text())
-            omsid = self.credentials_table.item(row, 2).text()
-            token = self.credentials_table.item(row, 3).text()
+        selected_rows = self.credentials_table.selectedItems()
+        if not selected_rows:
+            self.show_message("Предупреждение", "Выберите учетные данные для редактирования")
+            return
+        
+        row = selected_rows[0].row()
+        
+        # Получаем данные из таблицы
+        try:
+            credentials_id = int(self.credentials_table.item(row, 0).text()) if self.credentials_table.item(row, 0) else 0
+            omsid = self.credentials_table.item(row, 1).text() if self.credentials_table.item(row, 1) else ""
+            token = self.credentials_table.item(row, 2).text() if self.credentials_table.item(row, 2) else ""
+            gln = self.credentials_table.item(row, 3).text() if self.credentials_table.item(row, 3) else ""
             
-            dialog = CredentialsDialog(self)
-            # Заполняем поля текущими значениями
-            dialog.omsid_input.setText(omsid)
-            dialog.token_input.setText(token)
-            
-            if dialog.exec():
+            # Открываем диалог редактирования
+            dialog = CredentialsDialog(self, {"omsid": omsid, "token": token, "gln": gln})
+            if dialog.exec() == QDialog.DialogCode.Accepted:
                 data = dialog.get_data()
-                self.edit_credentials_signal.emit(credentials_id, data['omsid'], data['token'])
-        else:
-            QMessageBox.warning(self, "Ошибка", "Выберите учетные данные для редактирования")
+                self.edit_credentials_signal.emit(credentials_id, data['omsid'], data['token'], data['gln'])
+        except Exception as e:
+            self.show_message("Ошибка", f"Ошибка при редактировании учетных данных: {str(e)}")
     
     def on_delete_credentials_clicked(self):
         """Обработчик нажатия кнопки удаления учетных данных"""
-        row = self.credentials_table.currentRow()
-        if row >= 0:
-            credentials_id = int(self.credentials_table.item(row, 0).text())
-            self.delete_credentials_signal.emit(credentials_id)
-        else:
-            QMessageBox.warning(self, "Ошибка", "Выберите учетные данные для удаления")
+        selected_rows = self.credentials_table.selectedItems()
+        if not selected_rows:
+            self.show_message("Предупреждение", "Выберите учетные данные для удаления")
+            return
+        
+        row = selected_rows[0].row()
+        
+        try:
+            # Получаем ID учетных данных
+            credentials_id = int(self.credentials_table.item(row, 0).text()) if self.credentials_table.item(row, 0) else 0
+            
+            # Запрашиваем подтверждение
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Icon.Question)
+            msg_box.setText("Вы уверены, что хотите удалить эти учетные данные?")
+            msg_box.setWindowTitle("Подтверждение удаления")
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            msg_box.setDefaultButton(QMessageBox.StandardButton.No)
+            
+            if msg_box.exec() == QMessageBox.StandardButton.Yes:
+                # Вызываем сигнал удаления учетных данных
+                self.delete_credentials_signal.emit(credentials_id)
+        except Exception as e:
+            self.show_message("Ошибка", f"Ошибка при удалении учетных данных: {str(e)}")
     
     def on_add_nomenclature_clicked(self):
         """Обработчик нажатия кнопки добавления номенклатуры"""
@@ -482,9 +530,29 @@ class MainWindow(QMainWindow):
         self.orders_table.setRowCount(len(orders))
         for row, order in enumerate(orders):
             self.orders_table.setItem(row, 0, QTableWidgetItem(str(order.id)))
-            self.orders_table.setItem(row, 1, QTableWidgetItem(order.order_number))
-            self.orders_table.setItem(row, 2, QTableWidgetItem(order.status))
-            self.orders_table.setItem(row, 3, QTableWidgetItem(str(order.created_at)))
+            self.orders_table.setItem(row, 1, QTableWidgetItem(str(order.order_number)))
+            
+            # Статус заказа с цветовым выделением
+            status_item = QTableWidgetItem(order.status)
+            if order.status == "Принят":
+                status_item.setBackground(QColor(200, 255, 200))  # Зеленый для принятых заказов
+            elif order.status == "Непринят":
+                status_item.setBackground(QColor(255, 200, 200))  # Красный для непринятых заказов
+            self.orders_table.setItem(row, 2, status_item)
+            
+            # Дата создания
+            self.orders_table.setItem(row, 3, QTableWidgetItem(str(order.timestamp)))
+            
+            # Описание с ожидаемым временем выполнения
+            description = ""
+            if hasattr(order, 'expected_complete') and order.expected_complete:
+                description = f"Ожидаемое время выполнения: {order.expected_complete}"
+            elif hasattr(order, 'description') and order.description:
+                description = order.description
+            self.orders_table.setItem(row, 4, QTableWidgetItem(description))
+        
+        # Подгоняем размеры колонок
+        self.orders_table.resizeColumnsToContents()
     
     def update_connections_table(self, connections):
         """Обновление таблицы подключений"""
@@ -500,13 +568,9 @@ class MainWindow(QMainWindow):
         self.credentials_table.setRowCount(len(credentials))
         for row, cred in enumerate(credentials):
             self.credentials_table.setItem(row, 0, QTableWidgetItem(str(cred.id)))
-            
-            # Отображаем имя подключения, если оно есть
-            connection_name = cred.connection.name if cred.connection else "Не указано"
-            self.credentials_table.setItem(row, 1, QTableWidgetItem(connection_name))
-            
-            self.credentials_table.setItem(row, 2, QTableWidgetItem(cred.omsid))
-            self.credentials_table.setItem(row, 3, QTableWidgetItem(cred.token))
+            self.credentials_table.setItem(row, 1, QTableWidgetItem(cred.omsid))
+            self.credentials_table.setItem(row, 2, QTableWidgetItem(cred.token))
+            self.credentials_table.setItem(row, 3, QTableWidgetItem(cred.gln))
     
     def update_nomenclature_table(self, nomenclature):
         """Обновление таблицы номенклатуры"""
@@ -526,125 +590,94 @@ class MainWindow(QMainWindow):
         self.orders_tab = QWidget()
         layout = QVBoxLayout(self.orders_tab)
         
-        # Таблица заказов
+        # Создаем сплиттер для разделения списка заказов и деталей заказа
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        orders_widget = QWidget()
+        orders_layout = QVBoxLayout(orders_widget)
+        
+        details_widget = QWidget()
+        details_layout = QVBoxLayout(details_widget)
+        
+        # Верхняя часть: таблица заказов и кнопки управления
         self.orders_table = QTableWidget()
-        self.orders_table.setColumnCount(4)
-        self.orders_table.setHorizontalHeaderLabels(["ID", "Номер заказа", "Статус", "Дата создания"])
-        layout.addWidget(self.orders_table)
+        self.orders_table.setColumnCount(5)
+        self.orders_table.setHorizontalHeaderLabels(["ID", "Номер", "Статус", "Дата создания", "Описание"])
+        self.orders_table.itemSelectionChanged.connect(self.on_order_selected)
+        orders_layout.addWidget(self.orders_table)
         
-        # Кнопки для работы с API
-        api_layout = QHBoxLayout()
-        self.ping_button = QPushButton("Проверить API")
-        self.ping_button.clicked.connect(self.on_ping_clicked)
-        self.get_orders_button = QPushButton("Получить заказы")
-        self.get_orders_button.clicked.connect(self.on_get_orders_clicked)
-        self.get_report_button = QPushButton("Получить отчет")
-        self.get_report_button.clicked.connect(self.on_get_report_clicked)
-        self.get_version_button = QPushButton("Получить версию СУЗ и API")
-        self.get_version_button.clicked.connect(self.on_get_version_clicked)
-        self.get_orders_status_button = QPushButton("Получить статус заказов")
-        self.get_orders_status_button.clicked.connect(self.on_get_orders_status_clicked)
-        self.create_emission_order_button = QPushButton("Создать заказ на эмиссию КМ")
-        self.create_emission_order_button.clicked.connect(self.on_create_emission_order_clicked)
-        
-        api_layout.addWidget(self.ping_button)
-        api_layout.addWidget(self.get_orders_button)
-        api_layout.addWidget(self.get_report_button)
-        api_layout.addWidget(self.get_version_button)
-        api_layout.addWidget(self.get_orders_status_button)
-        api_layout.addWidget(self.create_emission_order_button)
-        
-        layout.addLayout(api_layout)
-
-    def create_connections_tab(self):
-        """Создание вкладки подключений"""
-        self.connections_tab = QWidget()
-        layout = QVBoxLayout(self.connections_tab)
-        
-        # Таблица подключений
-        self.connections_table = QTableWidget()
-        self.connections_table.setColumnCount(4)
-        self.connections_table.setHorizontalHeaderLabels(["ID", "Название", "URL", "Активно"])
-        layout.addWidget(self.connections_table)
-        
-        # Кнопки для работы с подключениями
+        # Кнопки управления заказами
         buttons_layout = QHBoxLayout()
-        add_connection_button = QPushButton("Добавить подключение")
-        add_connection_button.clicked.connect(self.on_add_connection_clicked)
-        buttons_layout.addWidget(add_connection_button)
         
-        edit_connection_button = QPushButton("Редактировать")
-        edit_connection_button.clicked.connect(self.on_edit_connection_clicked)
-        buttons_layout.addWidget(edit_connection_button)
+        add_button = QPushButton("Добавить заказ")
+        add_button.clicked.connect(self.on_add_order_clicked)
+        buttons_layout.addWidget(add_button)
         
-        delete_connection_button = QPushButton("Удалить")
-        delete_connection_button.clicked.connect(self.on_delete_connection_clicked)
-        buttons_layout.addWidget(delete_connection_button)
+        ping_button = QPushButton("Проверить доступность API")
+        ping_button.clicked.connect(self.on_ping_clicked)
+        buttons_layout.addWidget(ping_button)
         
-        set_active_button = QPushButton("Сделать активным")
-        set_active_button.clicked.connect(self.on_set_active_connection_clicked)
-        buttons_layout.addWidget(set_active_button)
+        get_orders_button = QPushButton("Получить заказы")
+        get_orders_button.clicked.connect(self.on_get_orders_clicked)
+        buttons_layout.addWidget(get_orders_button)
         
-        layout.addLayout(buttons_layout)
-
-    def create_credentials_tab(self):
-        """Создание вкладки учетных данных"""
-        self.credentials_tab = QWidget()
-        layout = QVBoxLayout(self.credentials_tab)
+        get_report_button = QPushButton("Получить отчет")
+        get_report_button.clicked.connect(self.on_get_report_clicked)
+        buttons_layout.addWidget(get_report_button)
         
-        # Таблица учетных данных
-        self.credentials_table = QTableWidget()
-        self.credentials_table.setColumnCount(4)
-        self.credentials_table.setHorizontalHeaderLabels(["ID", "Подключение", "OMSID", "Token"])
-        layout.addWidget(self.credentials_table)
+        get_version_button = QPushButton("Получить версию")
+        get_version_button.clicked.connect(self.on_get_version_clicked)
+        buttons_layout.addWidget(get_version_button)
         
-        # Кнопки для работы с учетными данными
-        buttons_layout = QHBoxLayout()
-        add_credentials_button = QPushButton("Добавить учетные данные")
-        add_credentials_button.clicked.connect(self.on_add_credentials_clicked)
-        buttons_layout.addWidget(add_credentials_button)
+        get_orders_status_button = QPushButton("Получить статусы заказов")
+        get_orders_status_button.clicked.connect(self.on_get_orders_status_clicked)
+        buttons_layout.addWidget(get_orders_status_button)
         
-        edit_credentials_button = QPushButton("Редактировать")
-        edit_credentials_button.clicked.connect(self.on_edit_credentials_clicked)
-        buttons_layout.addWidget(edit_credentials_button)
+        create_emission_order_button = QPushButton("Создать заказ на эмиссию")
+        create_emission_order_button.clicked.connect(self.on_create_emission_order_clicked)
+        buttons_layout.addWidget(create_emission_order_button)
         
-        delete_credentials_button = QPushButton("Удалить")
-        delete_credentials_button.clicked.connect(self.on_delete_credentials_clicked)
-        buttons_layout.addWidget(delete_credentials_button)
+        orders_layout.addLayout(buttons_layout)
         
-        layout.addLayout(buttons_layout)
-
-    def create_nomenclature_tab(self):
-        """Создание вкладки номенклатуры"""
-        self.nomenclature_tab = QWidget()
-        layout = QVBoxLayout(self.nomenclature_tab)
+        # Нижняя часть: детали заказа
+        details_layout.addWidget(QLabel("Детали заказа:"))
+        self.order_details_table = QTableWidget()
+        self.order_details_table.setColumnCount(3)
+        self.order_details_table.setHorizontalHeaderLabels(["GTIN", "Количество", "Статус"])
+        details_layout.addWidget(self.order_details_table)
         
-        # Таблица номенклатуры
-        self.nomenclature_table = QTableWidget()
-        self.nomenclature_table.setColumnCount(4)
-        self.nomenclature_table.setHorizontalHeaderLabels(["ID", "Наименование", "GTIN", "Товарная группа"])
-        layout.addWidget(self.nomenclature_table)
+        # Добавляем виджеты в сплиттер
+        splitter.addWidget(orders_widget)
+        splitter.addWidget(details_widget)
+        splitter.setSizes([400, 200])
         
-        # Кнопки для работы с номенклатурой
-        buttons_layout = QHBoxLayout()
-        add_nomenclature_button = QPushButton("Добавить номенклатуру")
-        add_nomenclature_button.clicked.connect(self.on_add_nomenclature_clicked)
-        buttons_layout.addWidget(add_nomenclature_button)
+        # Добавляем сплиттер в макет вкладки
+        layout.addWidget(splitter)
+    
+    def on_order_selected(self):
+        """Обработчик выбора заказа в таблице"""
+        selected_rows = self.orders_table.selectedItems()
+        if selected_rows:
+            row = selected_rows[0].row()
+            order_id = int(self.orders_table.item(row, 0).text())
+            # Эмитируем сигнал для получения деталей заказа
+            self.get_order_details_signal.emit(order_id)
+    
+    def update_order_details_table(self, products):
+        """Обновление таблицы деталей заказа"""
+        self.order_details_table.setRowCount(len(products))
+        for row, product in enumerate(products):
+            # Получаем название продукта или используем GTIN, если название не найдено
+            product_name = product.get("product_name", "") or product.get("gtin", "")
+            self.order_details_table.setItem(row, 0, QTableWidgetItem(product_name))
+            self.order_details_table.setItem(row, 1, QTableWidgetItem(str(product.get("quantity", ""))))
         
-        edit_nomenclature_button = QPushButton("Редактировать")
-        edit_nomenclature_button.clicked.connect(self.on_edit_nomenclature_clicked)
-        buttons_layout.addWidget(edit_nomenclature_button)
-        
-        delete_nomenclature_button = QPushButton("Удалить")
-        delete_nomenclature_button.clicked.connect(self.on_delete_nomenclature_clicked)
-        buttons_layout.addWidget(delete_nomenclature_button)
-        
-        layout.addLayout(buttons_layout)
-
+        # Подгоняем размеры колонок
+        self.order_details_table.resizeColumnsToContents()
+    
     def on_create_emission_order_clicked(self):
         """Обработчик нажатия кнопки создания заказа на эмиссию КМ"""
         # Импортируем здесь, чтобы избежать циклических зависимостей
-        from .dialogs import EmissionOrderDialog
+        from views.dialogs import EmissionOrderDialog
         from models.models import EmissionType
         
         # Получаем данные в контроллере через сигналы и слоты
@@ -677,17 +710,16 @@ class MainWindow(QMainWindow):
         # Получаем данные о расширениях API из таблицы
         for row in range(self.extensions_table.rowCount()):
             id_item = self.extensions_table.item(row, 0)
-            code_item = self.extensions_table.item(row, 1)
-            name_item = self.extensions_table.item(row, 2)
-            is_active_item = self.extensions_table.item(row, 3)
+            name_item = self.extensions_table.item(row, 1)
+            is_active_item = self.extensions_table.item(row, 2)
             
-            if id_item and code_item and name_item and is_active_item:
+            if id_item and name_item and is_active_item:
                 from models.models import Extension
                 extension = Extension(
                     int(id_item.text()),
-                    code_item.text(),
-                    name_item.text(),
-                    is_active_item.text() == "Да"
+                    name_item.text() if hasattr(name_item, 'text') else "",
+                    name_item.text() if hasattr(name_item, 'text') else "",
+                    is_active_item.text() == "Да" if hasattr(is_active_item, 'text') else False
                 )
                 extensions.append(extension)
         
@@ -706,6 +738,16 @@ class MainWindow(QMainWindow):
                 )
                 countries.append(country)
         
+        # Добавим страны по умолчанию, если таблица пуста
+        if not countries:
+            from models.models import Country
+            default_countries = [
+                Country(1, "BY", "Беларусь"),
+                Country(2, "RU", "Россия"),
+                Country(3, "KZ", "Казахстан")
+            ]
+            countries.extend(default_countries)
+            
         # Получаем данные о типах эмиссии из контроллера
         # Но поскольку нет прямого доступа к базе данных, создаем типы эмиссии вручную
         emission_types = [
@@ -716,6 +758,23 @@ class MainWindow(QMainWindow):
             EmissionType(5, "REMARK", "Перемаркировка", None)
         ]
         
+        # Если нет расширений, добавляем стандартные
+        if not extensions:
+            from models.models import Extension
+            default_extensions = [
+                Extension(1, "pharma", "Фармацевтическая продукция", True),
+                Extension(2, "tobacco", "Табачная продукция", False),
+                Extension(3, "shoes", "Обувь", False),
+                Extension(4, "tires", "Шины", False),
+                Extension(5, "lp", "Легкая промышленность", False),
+                Extension(6, "perfum", "Парфюмерия", False),
+                Extension(7, "photo", "Фототехника", False),
+                Extension(8, "milk", "Молочная продукция", False),
+                Extension(9, "water", "Упакованная вода", False)
+            ]
+            extensions.extend(default_extensions)
+        
+        # Создаем диалог с передачей всех данных
         dialog = EmissionOrderDialog(self, nomenclatures, extensions, emission_types, countries)
         if dialog.exec():
             # Получаем данные заказа из диалога
@@ -724,20 +783,24 @@ class MainWindow(QMainWindow):
             self.create_emission_order_signal.emit(order_data)
 
     def create_countries_tab(self):
-        """Создание вкладки стран"""
+        """Создание вкладки для работы со странами"""
         self.countries_tab = QWidget()
         layout = QVBoxLayout(self.countries_tab)
         
         # Таблица стран
         self.countries_table = QTableWidget()
         self.countries_table.setColumnCount(3)
-        self.countries_table.setHorizontalHeaderLabels(["ID", "Код страны", "Название"])
+        self.countries_table.setHorizontalHeaderLabels(["ID", "Код", "Название"])
         layout.addWidget(self.countries_table)
         
-        # Кнопка обновления
-        refresh_button = QPushButton("Обновить список стран")
+        # Кнопки управления
+        buttons_layout = QHBoxLayout()
+        
+        refresh_button = QPushButton("Обновить список")
         refresh_button.clicked.connect(self.load_countries_signal.emit)
-        layout.addWidget(refresh_button)
+        buttons_layout.addWidget(refresh_button)
+        
+        layout.addLayout(buttons_layout)
     
     def update_countries_table(self, countries):
         """Обновление таблицы стран"""
@@ -747,3 +810,256 @@ class MainWindow(QMainWindow):
             self.countries_table.setItem(row, 1, QTableWidgetItem(country.code))
             self.countries_table.setItem(row, 2, QTableWidgetItem(country.name))
         self.countries_table.resizeColumnsToContents() 
+
+    def show_catalogs_dialog(self):
+        """Показать диалог справочников"""
+        dialog = CatalogsDialog(self)
+        dialog.exec()
+    
+    def show_settings_dialog(self):
+        """Показать диалог настроек"""
+        dialog = SettingsDialog(self)
+        dialog.exec()
+
+    def create_connections_tab(self):
+        """Создание вкладки подключений"""
+        self.connections_tab = QWidget()
+        layout = QVBoxLayout(self.connections_tab)
+        
+        # Таблица подключений
+        self.connections_table = QTableWidget()
+        self.connections_table.setColumnCount(4)
+        self.connections_table.setHorizontalHeaderLabels(["ID", "Название", "URL", "Активный"])
+        layout.addWidget(self.connections_table)
+        
+        # Кнопки управления подключениями
+        buttons_layout = QHBoxLayout()
+        
+        add_button = QPushButton("Добавить")
+        add_button.clicked.connect(self.on_add_connection_clicked)
+        buttons_layout.addWidget(add_button)
+        
+        edit_button = QPushButton("Изменить")
+        edit_button.clicked.connect(self.on_edit_connection_clicked)
+        buttons_layout.addWidget(edit_button)
+        
+        delete_button = QPushButton("Удалить")
+        delete_button.clicked.connect(self.on_delete_connection_clicked)
+        buttons_layout.addWidget(delete_button)
+        
+        set_active_button = QPushButton("Установить активным")
+        set_active_button.clicked.connect(self.on_set_active_connection_clicked)
+        buttons_layout.addWidget(set_active_button)
+        
+        layout.addLayout(buttons_layout)
+
+    def create_credentials_tab(self):
+        """Создание вкладки учетных данных"""
+        self.credentials_tab = QWidget()
+        layout = QVBoxLayout(self.credentials_tab)
+        
+        # Таблица учетных данных
+        self.credentials_table = QTableWidget()
+        self.credentials_table.setColumnCount(4)
+        self.credentials_table.setHorizontalHeaderLabels(["ID", "OMS ID", "Токен", "GLN"])
+        layout.addWidget(self.credentials_table)
+        
+        # Кнопки управления учетными данными
+        buttons_layout = QHBoxLayout()
+        
+        add_button = QPushButton("Добавить")
+        add_button.clicked.connect(self.on_add_credentials_clicked)
+        buttons_layout.addWidget(add_button)
+        
+        edit_button = QPushButton("Изменить")
+        edit_button.clicked.connect(self.on_edit_credentials_clicked)
+        buttons_layout.addWidget(edit_button)
+        
+        delete_button = QPushButton("Удалить")
+        delete_button.clicked.connect(self.on_delete_credentials_clicked)
+        buttons_layout.addWidget(delete_button)
+        
+        layout.addLayout(buttons_layout)
+
+    def create_nomenclature_tab(self):
+        """Создание вкладки номенклатуры"""
+        self.nomenclature_tab = QWidget()
+        layout = QVBoxLayout(self.nomenclature_tab)
+        
+        # Таблица номенклатуры
+        self.nomenclature_table = QTableWidget()
+        self.nomenclature_table.setColumnCount(4)
+        self.nomenclature_table.setHorizontalHeaderLabels(["ID", "GTIN", "Название", "Описание"])
+        layout.addWidget(self.nomenclature_table)
+        
+        # Кнопки управления номенклатурой
+        buttons_layout = QHBoxLayout()
+        
+        add_button = QPushButton("Добавить")
+        add_button.clicked.connect(self.on_add_nomenclature_clicked)
+        buttons_layout.addWidget(add_button)
+        
+        edit_button = QPushButton("Изменить")
+        edit_button.clicked.connect(self.on_edit_nomenclature_clicked)
+        buttons_layout.addWidget(edit_button)
+        
+        delete_button = QPushButton("Удалить")
+        delete_button.clicked.connect(self.on_delete_nomenclature_clicked)
+        buttons_layout.addWidget(delete_button)
+        
+        layout.addLayout(buttons_layout)
+
+class CredentialsDialog(QDialog):
+    """Диалог добавления/редактирования учетных данных"""
+    def __init__(self, parent=None, credentials=None):
+        super().__init__(parent)
+        self.setWindowTitle("Учетные данные")
+        self.resize(400, 200)
+        
+        layout = QVBoxLayout(self)
+        
+        # Поле OMSID
+        omsid_layout = QHBoxLayout()
+        omsid_layout.addWidget(QLabel("OMSID:"))
+        self.omsid_input = QLineEdit()
+        omsid_layout.addWidget(self.omsid_input)
+        layout.addLayout(omsid_layout)
+        
+        # Поле токена
+        token_layout = QHBoxLayout()
+        token_layout.addWidget(QLabel("Токен:"))
+        self.token_input = QLineEdit()
+        token_layout.addWidget(self.token_input)
+        layout.addLayout(token_layout)
+        
+        # Поле GLN
+        gln_layout = QHBoxLayout()
+        gln_layout.addWidget(QLabel("GLN (factoryId):"))
+        self.gln_input = QLineEdit()
+        gln_layout.addWidget(self.gln_input)
+        layout.addLayout(gln_layout)
+        
+        # Кнопки
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        
+        # Если передан объект учетных данных, заполняем поля
+        if credentials:
+            self.omsid_input.setText(credentials.omsid)
+            self.token_input.setText(credentials.token)
+            self.gln_input.setText(credentials.gln)
+    
+    def get_data(self):
+        """Получение данных из полей формы"""
+        return {
+            'omsid': self.omsid_input.text(),
+            'token': self.token_input.text(),
+            'gln': self.gln_input.text()
+        } 
+
+class CatalogsDialog(QDialog):
+    """Диалог для работы со справочниками"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Справочники")
+        self.resize(800, 600)
+        
+        # Получаем ссылку на главное окно
+        self.main_window = parent
+        
+        layout = QVBoxLayout(self)
+        
+        # Создаем виджет с вкладками
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+        
+        # Создаем вкладки
+        self.create_nomenclature_tab()
+        self.create_extensions_tab()
+        self.create_countries_tab()
+        
+        # Добавляем вкладки в виджет
+        self.tabs.addTab(self.nomenclature_tab, "Номенклатура")
+        self.tabs.addTab(self.extensions_tab, "Виды продукции")
+        self.tabs.addTab(self.countries_tab, "Страны")
+        
+        # Кнопки
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def create_nomenclature_tab(self):
+        """Создание вкладки номенклатуры"""
+        self.nomenclature_tab = QWidget()
+        layout = QVBoxLayout(self.nomenclature_tab)
+        
+        # Копируем содержимое из главного окна
+        layout.addWidget(self.main_window.nomenclature_table)
+        layout.addLayout(self.main_window.nomenclature_buttons_layout)
+    
+    def create_extensions_tab(self):
+        """Создание вкладки видов продукции"""
+        self.extensions_tab = QWidget()
+        layout = QVBoxLayout(self.extensions_tab)
+        
+        # Копируем содержимое из главного окна
+        layout.addWidget(self.main_window.extensions_table)
+        layout.addLayout(self.main_window.extensions_buttons_layout)
+    
+    def create_countries_tab(self):
+        """Создание вкладки стран"""
+        self.countries_tab = QWidget()
+        layout = QVBoxLayout(self.countries_tab)
+        
+        # Копируем содержимое из главного окна
+        layout.addWidget(self.main_window.countries_table)
+
+
+class SettingsDialog(QDialog):
+    """Диалог для работы с настройками"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Настройки")
+        self.resize(800, 600)
+        
+        # Получаем ссылку на главное окно
+        self.main_window = parent
+        
+        layout = QVBoxLayout(self)
+        
+        # Создаем виджет с вкладками
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+        
+        # Создаем вкладки
+        self.create_connections_tab()
+        self.create_credentials_tab()
+        
+        # Добавляем вкладки в виджет
+        self.tabs.addTab(self.connections_tab, "Подключения")
+        self.tabs.addTab(self.credentials_tab, "Учетные данные")
+        
+        # Кнопки
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def create_connections_tab(self):
+        """Создание вкладки подключений"""
+        self.connections_tab = QWidget()
+        layout = QVBoxLayout(self.connections_tab)
+        
+        # Копируем содержимое из главного окна
+        layout.addWidget(self.main_window.connections_table)
+        layout.addLayout(self.main_window.connections_buttons_layout)
+    
+    def create_credentials_tab(self):
+        """Создание вкладки учетных данных"""
+        self.credentials_tab = QWidget()
+        layout = QVBoxLayout(self.credentials_tab)
+        
+        # Копируем содержимое из главного окна
+        layout.addWidget(self.main_window.credentials_table)
+        layout.addLayout(self.main_window.credentials_buttons_layout) 

@@ -270,23 +270,15 @@ class EmissionOrderDialog(QDialog):
         
         layout.addWidget(product_group)
         
-        # Информация для фармацевтической промышленности
-        self.pharma_group = QGroupBox("Информация для фармацевтической промышленности")
-        pharma_layout = QFormLayout(self.pharma_group)
+        # Группа обязательных полей для всех типов заказов
+        common_group = QGroupBox("Обязательная информация")
+        common_layout = QFormLayout(common_group)
         
-        # ID производства
+        # ID производства (factoryId) - обязательное поле для всех типов заказов
         self.factory_id_input = QLineEdit()
-        pharma_layout.addRow("ID производства (factoryId)*:", self.factory_id_input)
+        common_layout.addRow("ID производства (factoryId)*:", self.factory_id_input)
         
-        # Наименование производства
-        self.factory_name_input = QLineEdit()
-        pharma_layout.addRow("Наименование производства:", self.factory_name_input)
-        
-        # Адрес производства
-        self.factory_address_input = QLineEdit()
-        pharma_layout.addRow("Адрес производства:", self.factory_address_input)
-        
-        # Страна производителя - заменяем текстовое поле на выпадающий список
+        # Страна производителя - обязательное поле для всех типов заказов
         self.factory_country_combo = QComboBox()
         for country in self.countries:
             self.factory_country_combo.addItem(country.name, country.code)
@@ -296,7 +288,25 @@ class EmissionOrderDialog(QDialog):
         if default_factory_country_idx >= 0:
             self.factory_country_combo.setCurrentIndex(default_factory_country_idx)
         
-        pharma_layout.addRow("Страна производителя*:", self.factory_country_combo)
+        common_layout.addRow("Страна производителя*:", self.factory_country_combo)
+        
+        # Способ выпуска товаров в оборот - обязательное поле для всех типов
+        self.release_method_combo = QComboBox()
+        common_layout.addRow("Способ выпуска товаров*:", self.release_method_combo)
+        
+        layout.addWidget(common_group)
+        
+        # Информация для фармацевтической промышленности
+        self.pharma_group = QGroupBox("Информация для фармацевтической промышленности")
+        pharma_layout = QFormLayout(self.pharma_group)
+        
+        # Наименование производства
+        self.factory_name_input = QLineEdit()
+        pharma_layout.addRow("Наименование производства:", self.factory_name_input)
+        
+        # Адрес производства
+        self.factory_address_input = QLineEdit()
+        pharma_layout.addRow("Адрес производства:", self.factory_address_input)
         
         # ID производственной линии
         self.production_line_id_input = QLineEdit()
@@ -319,11 +329,6 @@ class EmissionOrderDialog(QDialog):
         self.expected_start_date_input.setCalendarPopup(True)
         self.expected_start_date_input.setDate(QDate.currentDate())
         pharma_layout.addRow("Дата начала производства:", self.expected_start_date_input)
-        
-        # Способ выпуска товаров в оборот
-        self.release_method_combo = QComboBox()
-        # В зависимости от выбранной товарной группы будут отображаться соответствующие способы выпуска
-        pharma_layout.addRow("Способ выпуска товаров*:", self.release_method_combo)
         
         # Страна производства
         self.country_combo = QComboBox()
@@ -375,6 +380,45 @@ class EmissionOrderDialog(QDialog):
         # Заполняем комбо-бокс отфильтрованными типами эмиссии
         for emission_type in filtered_emission_types:
             self.release_method_combo.addItem(emission_type.name, emission_type.code)
+            
+        # Добавляем дефолтные типы, если список пуст
+        if self.release_method_combo.count() == 0:
+            default_emission_types = [
+                ("Производство", "PRODUCTION"),
+                ("Импорт", "IMPORT"),
+                ("Остатки", "REMAINS")
+            ]
+            for name, code in default_emission_types:
+                self.release_method_combo.addItem(name, code)
+                
+        # Пытаемся установить автоматическое значение GLN для factoryId
+        self.set_gln_as_factory_id()
+    
+    def set_gln_as_factory_id(self):
+        """Устанавливает значение GLN из учетных данных в поле factoryId"""
+        try:
+            # Пытаемся получить родительское окно (MainWindow)
+            main_window = self.parent()
+            if not main_window:
+                return
+                
+            # Если есть таблица учетных данных и в ней есть строки
+            if hasattr(main_window, 'credentials_table') and main_window.credentials_table.rowCount() > 0:
+                # Ищем активные учетные данные (по первой строке)
+                gln_item = None
+                
+                # Проверяем все строки, ищем непустой GLN
+                for row in range(main_window.credentials_table.rowCount()):
+                    item = main_window.credentials_table.item(row, 3)  # GLN в четвертом столбце (индекс 3)
+                    if item and item.text().strip():
+                        gln_item = item
+                        break
+                        
+                if gln_item and gln_item.text().strip():
+                    self.factory_id_input.setText(gln_item.text().strip())
+        except Exception as e:
+            # Просто логируем ошибку, но не прерываем работу
+            print(f"Ошибка при попытке установить GLN в factoryId: {str(e)}")
     
     def on_serial_type_changed(self, index):
         """Обработчик изменения типа серийного номера"""
@@ -401,15 +445,23 @@ class EmissionOrderDialog(QDialog):
             QMessageBox.warning(self, "Ошибка валидации", "GTIN должен состоять из 14 цифр")
             return
         
-        # Проверяем обязательные поля для фармацевтики
+        # Проверяем обязательные поля для всех типов заказов
+        if not self.factory_id_input.text():
+            QMessageBox.warning(self, "Ошибка валидации", "Укажите ID производства (factoryId)")
+            return
+        
+        if not self.factory_country_combo.currentData():
+            QMessageBox.warning(self, "Ошибка валидации", "Укажите страну производителя")
+            return
+        
+        if not self.release_method_combo.currentData():
+            QMessageBox.warning(self, "Ошибка валидации", "Укажите способ выпуска товаров")
+            return
+        
+        # Проверяем дополнительные поля для фармацевтики
         if self.current_extension_code == "pharma":
-            if not self.factory_id_input.text():
-                QMessageBox.warning(self, "Ошибка валидации", "Укажите ID производства (factoryId)")
-                return
-            
-            if not self.factory_country_combo.currentData():
-                QMessageBox.warning(self, "Ошибка валидации", "Укажите страну производителя")
-                return
+            # Здесь можно добавить дополнительные проверки для фармацевтики
+            pass
         
         # Проверяем серийные номера для типа SELF_MADE
         serial_type = self.serial_type_combo.currentData()
@@ -449,22 +501,25 @@ class EmissionOrderDialog(QDialog):
         
         # Формируем основной словарь заказа
         order_data = {
-            "products": [product]
+            "products": [product],
+            # Добавляем factoryId как обязательное поле для всех типов заказов
+            "factoryId": self.factory_id_input.text(),
+            # Добавляем тип метода выпуска для всех типов заказов 
+            "releaseMethodType": self.release_method_combo.currentData(),
+            # Добавляем страну для всех типов заказов
+            "factoryCountry": self.factory_country_combo.currentData()
         }
         
         # Добавляем специфичные для фармацевтики поля
         if self.current_extension_code == "pharma":
             pharma_fields = {
-                "factoryId": self.factory_id_input.text(),
                 "factoryName": self.factory_name_input.text(),
                 "factoryAddress": self.factory_address_input.text(),
-                "factoryCountry": self.factory_country_combo.currentData(),
                 "productionLineId": self.production_line_id_input.text(),
                 "productCode": self.product_code_input.text(),
                 "productDescription": self.product_description_input.text(),
                 "poNumber": self.po_number_input.text(),
                 "expectedStartDate": self.expected_start_date_input.date().toString("yyyy-MM-dd"),
-                "releaseMethodType": self.release_method_combo.currentData(),
                 "country": self.country_combo.currentData()
             }
             

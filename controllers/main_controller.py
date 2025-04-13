@@ -9,11 +9,12 @@ logger = logging.getLogger(__name__)
 
 class MainController(QObject):
     """Контроллер приложения"""
-    def __init__(self, view, db, api_client):
+    def __init__(self, view, db, api_client, api_logger):
         super().__init__()
         self.view = view
         self.db = db
         self.api_client = api_client
+        self.api_logger = api_logger
         
         # Подключение сигналов и слотов
         self.connect_signals()
@@ -70,6 +71,7 @@ class MainController(QObject):
         self.view.get_version_signal.connect(self.get_version)
         self.view.get_orders_status_signal.connect(self.get_orders_status)
         self.view.create_emission_order_signal.connect(self.create_emission_order)
+        self.view.get_order_details_signal.connect(self.get_order_details)
         
         # Сигналы вкладки подключений
         self.view.add_connection_signal.connect(self.add_connection)
@@ -113,10 +115,13 @@ class MainController(QObject):
             orders = self.db.get_orders()
             self.view.update_orders_table(orders)
             logger.info("Таблица заказов обновлена")
+            
+            # Обновляем таблицу логов API
+            self.load_api_logs()
+            
         except Exception as e:
-            logger.error(f"Ошибка при загрузке заказов из базы данных: {str(e)}")
-            self.view.show_message("Ошибка", 
-                f"Ошибка при загрузке заказов из базы данных: {str(e)}")
+            logger.error(f"Ошибка при получении списка заказов: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при получении списка заказов: {str(e)}")
     
     def load_connections(self):
         """Загрузка подключений из базы данных"""
@@ -184,7 +189,7 @@ class MainController(QObject):
         """Добавление нового заказа"""
         try:
             # Сохранение в базу данных
-            order = self.db.add_order(order_number, status)
+            order = self.db.add_order(order_number=order_number, status=status)
             logger.info(f"Заказ {order_number} сохранен в базе данных")
             
             try:
@@ -208,42 +213,56 @@ class MainController(QObject):
     
     def update_api_client_settings(self):
         """Обновление настроек API-клиента из базы данных"""
-        # Получаем активное подключение
-        connection = self.db.get_active_connection()
-        if connection:
-            self.api_client.base_url = connection.url
-            # Обновляем информацию о сервере в строке состояния
-            self.view.update_server_status(connection.name, connection.url)
+        try:
+            # Получаем активное подключение
+            connection = self.db.get_active_connection()
+            if connection:
+                self.api_client.base_url = connection.url
+                # Обновляем информацию о сервере в строке состояния
+                self.view.update_server_status(connection.name, connection.url)
+                
+                # Получаем учетные данные для активного подключения
+                try:
+                    credentials_list = self.db.get_credentials_for_connection(connection.id)
+                    if credentials_list:
+                        # Используем первые учетные данные для этого подключения
+                        self.api_client.omsid = credentials_list[0].omsid
+                        # Токен будет использоваться в запросе ping
+                except Exception as e:
+                    logger.warning(f"Не удалось получить учетные данные для подключения: {str(e)}")
+            else:
+                # Если нет активного подключения, очищаем информацию в строке состояния
+                self.view.update_server_status("", "")
             
-            # Получаем учетные данные для активного подключения
-            credentials_list = self.db.get_credentials_for_connection(connection.id)
-            if credentials_list:
-                # Используем первые учетные данные для этого подключения
-                self.api_client.omsid = credentials_list[0].omsid
-                # Токен будет использоваться в запросе ping
-        else:
-            # Если нет активного подключения, очищаем информацию в строке состояния
-            self.view.update_server_status("", "")
-        
-        # Получаем активное расширение API
-        extension = self.db.get_active_extension()
-        if extension:
-            self.api_client.extension = extension.code
-        
-        # Если OMSID еще не установлен, получаем из настроек или первых учетных данных
-        if not hasattr(self.api_client, 'omsid') or not self.api_client.omsid:
-            omsid = self.db.get_setting("omsid", "")
-            if not omsid:
-                # Здесь мы берем любые учетные данные, не важно к какому подключению они привязаны
-                credentials = self.db.get_credentials()
-                if credentials:
-                    omsid = credentials[0].omsid
-                    # Сохраняем в настройки для будущего использования
-                    self.db.set_setting("omsid", omsid)
-            self.api_client.omsid = omsid
-        
-        # Устанавливаем ссылку на базу данных в API-клиенте для логирования
-        self.api_client.db = self.db
+            # Получаем активное расширение API
+            try:
+                extension = self.db.get_active_extension()
+                if extension:
+                    self.api_client.extension = extension.code
+            except Exception as e:
+                logger.warning(f"Не удалось получить активное расширение API: {str(e)}")
+            
+            # Если OMSID еще не установлен, получаем из настроек или первых учетных данных
+            if not hasattr(self.api_client, 'omsid') or not self.api_client.omsid:
+                try:
+                    omsid = self.db.get_setting("omsid", "")
+                    if not omsid:
+                        # Здесь мы берем любые учетные данные, не важно к какому подключению они привязаны
+                        credentials = self.db.get_credentials()
+                        if credentials:
+                            omsid = credentials[0].omsid
+                            # Сохраняем в настройки для будущего использования
+                            self.db.set_setting("omsid", omsid)
+                    self.api_client.omsid = omsid
+                except Exception as e:
+                    logger.warning(f"Не удалось получить OMSID: {str(e)}")
+                    self.api_client.omsid = ""
+            
+            # Устанавливаем ссылку на базу данных в API-клиенте для логирования
+            self.api_client.db = self.db
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении настроек API-клиента: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при обновлении настроек API-клиента: {str(e)}")
 
     def check_api(self):
         """Проверка доступности API"""
@@ -269,7 +288,10 @@ class MainController(QObject):
             logger.info(f"API доступен: {response}")
             self.view.update_api_status(True)
             self.view.show_message("Проверка API", "API доступен")
-            self.load_api_logs()  # Обновляем логи после проверки
+            
+            # Обновляем таблицу логов API
+            self.load_api_logs()
+            
         except requests.RequestException as e:
             logger.warning(f"API недоступен: {str(e)}")
             self.view.update_api_status(False)
@@ -295,6 +317,10 @@ class MainController(QObject):
             self.load_orders()
             logger.info("Заказы успешно загружены с сервера")
             self.view.show_message("Успех", "Заказы успешно загружены")
+            
+            # Обновляем таблицу логов API
+            self.load_api_logs()
+            
         except requests.RequestException as e:
             logger.warning(f"Не удалось получить заказы с сервера: {str(e)}")
             self.view.show_message("Предупреждение", 
@@ -309,13 +335,23 @@ class MainController(QObject):
             response = self.api_client.get_report()
             logger.info("Отчет успешно получен")
             self.view.show_message("Отчет", str(response))
+            
+            # Обновляем таблицу логов API
+            self.load_api_logs()
+            
         except requests.RequestException as e:
             logger.warning(f"Не удалось получить отчет: {str(e)}")
-            self.view.show_message("Предупреждение", 
-                "Не удалось получить отчет. Сервер недоступен")
+            self.view.show_message("Предупреждение", "Не удалось получить отчет")
+            
+            # Обновляем таблицу логов API
+            self.load_api_logs()
+            
         except Exception as e:
             logger.error(f"Ошибка при получении отчета: {str(e)}")
             self.view.show_message("Ошибка", f"Ошибка при получении отчета: {str(e)}")
+            
+            # Обновляем таблицу логов API
+            self.load_api_logs()
     
     def get_orders_status(self):
         """Получение статуса заказов"""
@@ -367,18 +403,23 @@ class MainController(QObject):
             # Отображаем результат
             self.view.show_message("Статус заказов", message)
             
-            # Обновляем логи
+            # Обновляем таблицу логов API
             self.load_api_logs()
             
         except requests.RequestException as e:
             logger.warning(f"Не удалось получить статус заказов: {str(e)}")
             self.view.show_message("Предупреждение", 
                 f"Не удалось получить статус заказов. Сервер недоступен: {str(e)}")
-            self.load_api_logs()  # Обновляем логи после ошибки
+            
+            # Обновляем таблицу логов API
+            self.load_api_logs()
+            
         except Exception as e:
             logger.error(f"Ошибка при получении статуса заказов: {str(e)}")
             self.view.show_message("Ошибка", f"Ошибка при получении статуса заказов: {str(e)}")
-            self.load_api_logs()  # Обновляем логи после ошибки
+            
+            # Обновляем таблицу логов API
+            self.load_api_logs()
     
     def get_version(self):
         """Получение версии СУЗ и API"""
@@ -405,18 +446,23 @@ class MainController(QObject):
             logger.info(f"Получена информация о версии: {response}")
             self.view.show_message("Информация о версии", version_message)
             
-            # Обновляем логи
+            # Обновляем таблицу логов API
             self.load_api_logs()
             
         except requests.RequestException as e:
             logger.warning(f"Не удалось получить информацию о версии: {str(e)}")
             self.view.show_message("Предупреждение", 
                 f"Не удалось получить информацию о версии. Сервер недоступен: {str(e)}")
-            self.load_api_logs()  # Обновляем логи после ошибки
+            
+            # Обновляем таблицу логов API
+            self.load_api_logs()
+            
         except Exception as e:
             logger.error(f"Ошибка при получении информации о версии: {str(e)}")
             self.view.show_message("Ошибка", f"Ошибка при получении информации о версии: {str(e)}")
-            self.load_api_logs()  # Обновляем логи после ошибки
+            
+            # Обновляем таблицу логов API
+            self.load_api_logs()
     
     # Методы для работы с подключениями
     def add_connection(self, name, url):
@@ -470,13 +516,16 @@ class MainController(QObject):
             self.view.show_message("Ошибка", f"Ошибка при установке активного подключения: {str(e)}")
     
     # Методы для работы с учетными данными
-    def add_credentials(self, omsid, token, connection_id):
+    def add_credentials(self, omsid, token, gln, connection_id):
         """Добавление новых учетных данных"""
         try:
-            credentials = self.db.add_credentials(omsid, token, connection_id)
-            logger.info(f"Учетные данные для подключения {connection_id} добавлены")
+            # Сохранение в базу данных
+            self.db.add_credentials(omsid=omsid, token=token, gln=gln, connection_id=connection_id)
+            logger.info(f"Учетные данные для {omsid} сохранены в базе данных")
+            
+            # Обновление интерфейса
             self.load_credentials()
-            self.view.show_message("Успех", "Учетные данные успешно добавлены")
+            
         except Exception as e:
             logger.error(f"Ошибка при добавлении учетных данных: {str(e)}")
             self.view.show_message("Ошибка", f"Ошибка при добавлении учетных данных: {str(e)}")
@@ -577,6 +626,17 @@ class MainController(QObject):
         Args:
             order_data (dict): Данные заказа для отправки
         """
+        # Подготавливаем переменные для сохранения данных заказа
+        from datetime import datetime
+        import time
+        
+        order_id = "Не указан"
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        expected_complete_ms = 0
+        expected_complete_min = 0
+        status = "Непринят"  # По умолчанию статус "Непринят"
+        response = None
+        
         try:
             # Обновляем настройки API-клиента перед отправкой запроса
             self.update_api_client_settings()
@@ -602,42 +662,82 @@ class MainController(QObject):
                     "Не выбрано активное расширение API. Выберите расширение перед созданием заказа.")
                 return
             
-            # Если выбрана фармацевтика, проверяем обязательные поля
-            if extension.code == "pharma":
-                # Базовые проверки уже реализованы в методе create_order класса APIClient
-                pass
-            
-            # Отправляем запрос на создание заказа
+            # Создаем заказ через API
             response = self.api_client.create_order(order_data)
             
-            # Формируем и выводим сообщение с результатом
-            if "orderId" in response:
-                message = f"Заказ на эмиссию кодов успешно создан\n\nID заказа: {response['orderId']}"
-                logger.info(f"Создан заказ на эмиссию кодов, ID: {response['orderId']}")
-                self.view.show_message("Успех", message)
+            # Обновляем данные для сохранения заказа
+            if response:
+                order_id = response.get("orderId", "Не указан")
+                expected_complete_ms = response.get("expectedCompleteTimestamp", 0)
+                
+                # Преобразуем миллисекунды в дату и время
+                expected_complete = None
+                if expected_complete_ms:
+                    # Переводим миллисекунды в секунды и создаем объект даты/времени
+                    expected_complete = datetime.datetime.fromtimestamp(expected_complete_ms / 1000)
+                    expected_complete_str = expected_complete.strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    expected_complete_str = ""
+                
+                # Определяем статус заказа
+                # Статус "Принят", если omsId из ответа совпадает с omsId из запроса
+                # иначе статус "Непринят"
+                status = "Принят" if response.get("omsId") == self.api_client.omsid else "Непринят"
+            
+            # Обрабатываем ответ
+            if response and response.get("success", False):
+                logger.info(f"Заказ на эмиссию успешно создан. Идентификатор заказа: {order_id}")
+                self.view.show_message("Успех", f"Заказ на эмиссию успешно создан. ID заказа: {order_id}")
             else:
-                error_message = response.get("error", {}).get("message", "Неизвестная ошибка")
-                logger.warning(f"Ошибка при создании заказа: {error_message}")
-                self.view.show_message("Ошибка", f"Не удалось создать заказ: {error_message}")
-            
-            # Обновляем логи API
-            self.load_api_logs()
-            
+                error_message = "Ошибка при создании заказа"
+                if response:
+                    if "globalErrors" in response:
+                        error_message += ": " + ", ".join(response["globalErrors"])
+                    elif "error" in response:
+                        error_message += ": " + str(response["error"])
+                
+                logger.warning(error_message)
+                self.view.show_message("Предупреждение", error_message)
+        
         except ValueError as e:
-            # Обрабатываем ошибки валидации
-            logger.warning(f"Ошибка валидации данных заказа: {str(e)}")
-            self.view.show_message("Ошибка валидации", str(e))
+            logger.error(f"Ошибка валидации данных заказа: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка валидации данных заказа: {str(e)}")
+            return
         except requests.RequestException as e:
-            # Обрабатываем ошибки соединения
-            logger.warning(f"Ошибка соединения при создании заказа: {str(e)}")
-            self.view.show_message("Ошибка соединения", 
-                f"Не удалось создать заказ. Сервер недоступен: {str(e)}")
-            self.load_api_logs()
+            logger.error(f"Ошибка сети при создании заказа: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка сети при создании заказа: {str(e)}")
         except Exception as e:
-            # Обрабатываем прочие ошибки
-            logger.error(f"Непредвиденная ошибка при создании заказа: {str(e)}")
-            self.view.show_message("Ошибка", f"Непредвиденная ошибка при создании заказа: {str(e)}")
-            self.load_api_logs() 
+            logger.error(f"Ошибка при создании заказа: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при создании заказа: {str(e)}")
+        
+        # Сохраняем заказ в базу данных независимо от успешности отправки запроса
+        try:
+            # Сохраняем основную информацию о заказе
+            saved_order = self.db.add_order(
+                order_number=str(order_id),
+                timestamp=timestamp,
+                expected_complete=expected_complete_str,
+                status=status
+            )
+            
+            # Сохраняем детали заказа (товары)
+            for product in order_data.get("products", []):
+                self.db.add_order_product(
+                    order_id=saved_order.id,
+                    gtin=product.get("gtin", ""),
+                    quantity=product.get("quantity", 0)
+                )
+            
+            # Обновляем таблицу заказов
+            self.load_orders()
+            logger.info(f"Заказ сохранен в базу данных со статусом '{status}'")
+            
+            # Обновляем таблицу логов API
+            self.load_api_logs()
+            
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении заказа в базу данных: {str(e)}")
+            self.view.show_message("Ошибка", f"Заказ был отправлен, но не сохранен в базу данных: {str(e)}")
     
     def load_countries(self):
         """Загрузка списка стран из базы данных"""
@@ -671,3 +771,14 @@ class MainController(QObject):
             self.view.update_server_status(connection.name, connection.url)
         else:
             self.view.update_server_status("", "") 
+
+    def get_order_details(self, order_id):
+        """Получение деталей заказа"""
+        try:
+            products = self.db.get_order_products(order_id)
+            self.view.update_order_details_table(products)
+            logger.info(f"Детали заказа {order_id} загружены")
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке деталей заказа: {str(e)}")
+            self.view.show_message("Ошибка", 
+                f"Ошибка при загрузке деталей заказа: {str(e)}") 
