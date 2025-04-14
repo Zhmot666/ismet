@@ -855,6 +855,31 @@ class MainController(QObject):
                 api_orders = []
                 
                 for order_info in order_infos:
+                    # Форматируем timestamp из миллисекунд в читаемый формат
+                    timestamp_ms = order_info.get("createdTimestamp", 0)
+                    if timestamp_ms:
+                        try:
+                            # Преобразуем миллисекунды в дату/время
+                            dt = datetime.datetime.fromtimestamp(timestamp_ms / 1000.0)
+                            formatted_date = dt.strftime("%d.%m.%Y %H:%M:%S")
+                            order_info["createdTimestamp"] = formatted_date
+                        except Exception as e:
+                            logger.warning(f"Не удалось преобразовать timestamp: {e}")
+
+                    # Добавляем русские названия полей в буферы для более удобного отображения
+                    buffers = order_info.get("buffers", [])
+                    for buffer in buffers:
+                        # Используем оригинальные данные, но добавляем русские названия
+                        buffer["Заказ"] = buffer.get("orderId", "")
+                        buffer["Товар"] = buffer.get("gtin", "")
+                        buffer["Осталось"] = buffer.get("leftInBuffer", -1)
+                        buffer["Пулы исчерпаны"] = "Да" if buffer.get("poolsExhausted", False) else "Нет"
+                        buffer["Всего кодов"] = buffer.get("totalCodes", -1)
+                        buffer["Недоступно"] = buffer.get("unavailableCodes", -1)
+                        buffer["Доступно"] = buffer.get("availableCodes", -1)
+                        buffer["Передано"] = buffer.get("totalPassed", -1)
+                        buffer["OMS ID"] = buffer.get("omsId", "")
+
                     api_order = APIOrder(
                         order_id=order_info.get("orderId", ""),
                         order_status=order_info.get("orderStatus", ""),
@@ -864,20 +889,29 @@ class MainController(QObject):
                         product_group_type=order_info.get("productGroupType", ""),
                         signed=order_info.get("signed", False),
                         verified=order_info.get("verified", False),
-                        buffers=order_info.get("buffers", [])
+                        buffers=buffers
                     )
                     api_orders.append(api_order)
                 
                 # Сохраняем API заказы в базу данных
                 self.db.save_api_orders(api_orders)
                 
-                # Обновляем таблицу API заказов
-                self.view.update_api_orders_table(order_infos)
+                # ВАЖНО: Загружаем данные заново из базы данных, чтобы отобразить
+                # как обновленные заказы, так и помеченные как устаревшие
+                self.load_api_orders_from_db()
+                
                 logger.info(f"Загружено и сохранено {len(order_infos)} API заказов")
                 self.view.show_message("Успех", f"Загружено и сохранено {len(order_infos)} API заказов")
             else:
-                # Если нет данных, очищаем таблицу
-                self.view.update_api_orders_table([])
+                # Если нет данных, помечаем все существующие заказы как устаревшие,
+                # но не очищаем таблицу полностью
+                existing_api_orders = self.db.get_api_orders()
+                if existing_api_orders:
+                    # Создаем пустой список заказов (что приведет к отметке всех существующих как устаревших)
+                    self.db.save_api_orders([])
+                    # Загружаем данные заново для отображения устаревших заказов
+                    self.load_api_orders_from_db()
+                    
                 self.view.show_message("Информация", "Заказы не найдены в API")
             
             # Обновляем таблицу логов API
@@ -986,6 +1020,7 @@ class MainController(QObject):
                     order_info = {
                         "orderId": api_order.order_id,
                         "orderStatus": api_order.order_status,
+                        "orderStatusDescription": api_order.order_status_description,
                         "createdTimestamp": api_order.created_timestamp,
                         "totalQuantity": api_order.total_quantity,
                         "numOfProducts": api_order.num_of_products,
@@ -1000,8 +1035,21 @@ class MainController(QObject):
                 self.view.update_api_orders_table(order_infos)
                 logger.info(f"Загружено {len(order_infos)} API заказов из базы данных")
                 
+                # Находим, сколько из них устаревших
+                obsolete_count = sum(1 for order in api_orders if order.order_status == "OBSOLETE")
+                active_count = len(api_orders) - obsolete_count
+                
                 # Отображаем информацию в строке состояния
-                self.view.set_api_orders_status(f"Загружено {len(order_infos)} заказов из базы данных. Для обновления с сервера нажмите 'Обновить заказы'")
+                status_message = f"Загружено {len(order_infos)} заказов из базы данных ("
+                if active_count > 0:
+                    status_message += f"{active_count} активных"
+                if active_count > 0 and obsolete_count > 0:
+                    status_message += ", "
+                if obsolete_count > 0:
+                    status_message += f"{obsolete_count} устаревших"
+                status_message += "). Для обновления с сервера нажмите 'Обновить заказы'"
+                
+                self.view.set_api_orders_status(status_message)
             else:
                 # Если нет данных, очищаем таблицу
                 self.view.update_api_orders_table([])

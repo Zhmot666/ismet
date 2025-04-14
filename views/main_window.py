@@ -1080,24 +1080,51 @@ class MainWindow(QMainWindow):
         # Очищаем таблицу
         self.api_orders_table.setRowCount(0)
         
+        # Обновляем количество столбцов
+        self.api_orders_table.setColumnCount(10)
+        self.api_orders_table.setHorizontalHeaderLabels([
+            "ID заказа", "Статус", "Описание статуса", "Создан", "Количество", "Кол-во продуктов", 
+            "Тип продукции", "Подписан", "Проверен", "Буферы"
+        ])
+        
         # Заполняем таблицу данными
         for i, order_info in enumerate(order_infos):
             self.api_orders_table.insertRow(i)
             
+            # Проверяем, является ли заказ устаревшим
+            is_obsolete = order_info.get("orderStatus", "") == "OBSOLETE"
+            
             # Заполняем ячейки таблицы
             self.api_orders_table.setItem(i, 0, QTableWidgetItem(str(order_info.get("orderId", ""))))
-            self.api_orders_table.setItem(i, 1, QTableWidgetItem(str(order_info.get("orderStatus", ""))))
-            self.api_orders_table.setItem(i, 2, QTableWidgetItem(str(order_info.get("createdTimestamp", ""))))
-            self.api_orders_table.setItem(i, 3, QTableWidgetItem(str(order_info.get("totalQuantity", 0))))
-            self.api_orders_table.setItem(i, 4, QTableWidgetItem(str(order_info.get("numOfProducts", 0))))
-            self.api_orders_table.setItem(i, 5, QTableWidgetItem(str(order_info.get("productGroupType", ""))))
-            self.api_orders_table.setItem(i, 6, QTableWidgetItem(str(order_info.get("signed", False))))
-            self.api_orders_table.setItem(i, 7, QTableWidgetItem(str(order_info.get("verified", False))))
+            
+            # Статус заказа - специальное форматирование для устаревших
+            status_item = QTableWidgetItem(str(order_info.get("orderStatus", "")))
+            if is_obsolete:
+                status_item.setBackground(QColor(255, 200, 200))  # Светло-красный цвет
+            self.api_orders_table.setItem(i, 1, status_item)
+            
+            # Описание статуса
+            self.api_orders_table.setItem(i, 2, QTableWidgetItem(str(order_info.get("orderStatusDescription", ""))))
+            
+            # Остальные поля
+            self.api_orders_table.setItem(i, 3, QTableWidgetItem(str(order_info.get("createdTimestamp", ""))))
+            self.api_orders_table.setItem(i, 4, QTableWidgetItem(str(order_info.get("totalQuantity", 0))))
+            self.api_orders_table.setItem(i, 5, QTableWidgetItem(str(order_info.get("numOfProducts", 0))))
+            self.api_orders_table.setItem(i, 6, QTableWidgetItem(str(order_info.get("productGroupType", ""))))
+            self.api_orders_table.setItem(i, 7, QTableWidgetItem(str(order_info.get("signed", False))))
+            self.api_orders_table.setItem(i, 8, QTableWidgetItem(str(order_info.get("verified", False))))
             
             # Если есть буферы, добавляем их в последний столбец
             buffers = order_info.get("buffers", [])
             buffers_text = str(len(buffers)) if buffers else "0"
-            self.api_orders_table.setItem(i, 8, QTableWidgetItem(buffers_text))
+            self.api_orders_table.setItem(i, 9, QTableWidgetItem(buffers_text))
+            
+            # Для устаревших заказов делаем строку серой
+            if is_obsolete:
+                for col in range(self.api_orders_table.columnCount()):
+                    item = self.api_orders_table.item(i, col)
+                    if item:
+                        item.setForeground(QColor(128, 128, 128))  # Серый цвет
         
         # Подгоняем размеры колонок
         self.api_orders_table.resizeColumnsToContents()
@@ -1146,8 +1173,7 @@ class MainWindow(QMainWindow):
         
         # Добавляем информационное сообщение
         info_label = QLabel("Для получения актуальных данных о заказах из API нажмите кнопку 'Обновить заказы'. \n"
-                          "Обратите внимание: запросы к API выполняются только по нажатию кнопки, \n"
-                          "так как на сервере есть ограничение по количеству вызовов.")
+                          "Заказы, отсутствующие в новых данных, будут помечены как устаревшие и выделены серым цветом.")
         info_label.setStyleSheet("color: #666; font-style: italic;")
         self.api_orders_tab_layout.addWidget(info_label)
         
@@ -1161,9 +1187,9 @@ class MainWindow(QMainWindow):
         
         # Верхняя часть: таблица заказов и кнопки управления
         self.api_orders_table = QTableWidget()
-        self.api_orders_table.setColumnCount(9)
+        self.api_orders_table.setColumnCount(10)
         self.api_orders_table.setHorizontalHeaderLabels([
-            "ID заказа", "Статус", "Создан", "Количество", "Кол-во продуктов", 
+            "ID заказа", "Статус", "Описание статуса", "Создан", "Количество", "Кол-во продуктов", 
             "Тип продукции", "Подписан", "Проверен", "Буферы"
         ])
         self.api_orders_table.itemSelectionChanged.connect(self.on_api_order_selected)
@@ -1189,9 +1215,11 @@ class MainWindow(QMainWindow):
         # Нижняя часть: детали заказа (буферы)
         details_layout.addWidget(QLabel("Буферы кодов маркировки:"))
         self.api_buffers_table = QTableWidget()
-        self.api_buffers_table.setColumnCount(5)
+        self.api_buffers_table.setColumnCount(9)
         self.api_buffers_table.setHorizontalHeaderLabels([
-            "ID буфера", "GTIN", "Наименование", "Количество", "Емкость"
+            "ID заказа", "GTIN", "Осталось в буфере", "Пулы исчерпаны", 
+            "Всего кодов", "Недоступные коды", "Доступные коды", 
+            "Всего передано", "OMS ID"
         ])
         details_layout.addWidget(self.api_buffers_table)
         
@@ -1232,20 +1260,28 @@ class MainWindow(QMainWindow):
         # Очищаем таблицу
         self.api_buffers_table.setRowCount(0)
         
+        # Настраиваем столбцы - обновляем заголовки для соответствия с JSON
+        self.api_buffers_table.setColumnCount(9)
+        self.api_buffers_table.setHorizontalHeaderLabels([
+            "ID заказа", "GTIN", "Осталось в буфере", "Пулы исчерпаны", 
+            "Всего кодов", "Недоступные коды", "Доступные коды", 
+            "Всего передано", "OMS ID"
+        ])
+        
         # Заполняем таблицу данными
         for i, buffer in enumerate(buffers):
             self.api_buffers_table.insertRow(i)
             
-            # Заполняем ячейки таблицы
-            self.api_buffers_table.setItem(i, 0, QTableWidgetItem(str(buffer.get("bufferId", ""))))
+            # Заполняем ячейки таблицы согласно формату JSON
+            self.api_buffers_table.setItem(i, 0, QTableWidgetItem(str(buffer.get("orderId", ""))))
             self.api_buffers_table.setItem(i, 1, QTableWidgetItem(str(buffer.get("gtin", ""))))
-            
-            # Для наименования пока оставляем пустое значение, так как 
-            # в буфере нет информации о наименовании продукта
-            self.api_buffers_table.setItem(i, 2, QTableWidgetItem(""))
-            
-            self.api_buffers_table.setItem(i, 3, QTableWidgetItem(str(buffer.get("quantity", 0))))
-            self.api_buffers_table.setItem(i, 4, QTableWidgetItem(str(buffer.get("capacity", 0))))
+            self.api_buffers_table.setItem(i, 2, QTableWidgetItem(str(buffer.get("leftInBuffer", 0))))
+            self.api_buffers_table.setItem(i, 3, QTableWidgetItem("Да" if buffer.get("poolsExhausted", False) else "Нет"))
+            self.api_buffers_table.setItem(i, 4, QTableWidgetItem(str(buffer.get("totalCodes", 0))))
+            self.api_buffers_table.setItem(i, 5, QTableWidgetItem(str(buffer.get("unavailableCodes", 0))))
+            self.api_buffers_table.setItem(i, 6, QTableWidgetItem(str(buffer.get("availableCodes", 0))))
+            self.api_buffers_table.setItem(i, 7, QTableWidgetItem(str(buffer.get("totalPassed", 0))))
+            self.api_buffers_table.setItem(i, 8, QTableWidgetItem(str(buffer.get("omsId", ""))))
         
         # Подгоняем размеры колонок
         self.api_buffers_table.resizeColumnsToContents()

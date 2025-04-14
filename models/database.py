@@ -40,30 +40,16 @@ class APIOrderORM:
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         order_id TEXT NOT NULL UNIQUE,
         order_status TEXT NOT NULL,
+        order_status_description TEXT,
         created_timestamp TEXT NOT NULL,
         total_quantity INTEGER NOT NULL,
         num_of_products INTEGER NOT NULL,
         product_group_type TEXT NOT NULL,
         signed BOOLEAN NOT NULL,
         verified BOOLEAN NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """
-
-
-class APIOrderBufferORM:
-    """ORM класс для работы с буферами API заказов"""
-    table_name = "api_order_buffers"
-    create_table_query = """
-    CREATE TABLE IF NOT EXISTS api_order_buffers (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        api_order_id INTEGER NOT NULL,
-        buffer_id TEXT NOT NULL,
-        gtin TEXT NOT NULL,
-        quantity INTEGER NOT NULL,
-        capacity INTEGER NOT NULL,
+        buffers TEXT, 
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (api_order_id) REFERENCES api_orders (id) ON DELETE CASCADE
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """
 
@@ -190,10 +176,10 @@ class Database:
         
         # Создание таблицы для API заказов
         cursor.execute(APIOrderORM.create_table_query)
-        cursor.execute(APIOrderBufferORM.create_table_query)
         
         self.create_tables()
         self.migrate_database()
+        self.migrate_api_order_structure()  # Миграция структуры API заказов
         self.insert_default_extensions()
         self.insert_default_emission_types()
         self.insert_default_countries()
@@ -1519,31 +1505,119 @@ class Database:
     
     # Методы для работы с API заказами
     def save_api_orders(self, api_orders: List[APIOrder]) -> List[APIOrder]:
-        """Сохранение API заказов в базу данных"""
+        """Сохранение API заказов в базу данных
+        
+        Данные не удаляются полностью, а обновляются:
+        - Существующие заказы обновляются
+        - Новые заказы добавляются
+        - Заказы, отсутствующие в новом списке, помечаются как устаревшие
+        """
         try:
             cursor = self.conn.cursor()
             
-            # Очищаем таблицу перед сохранением новых данных
-            cursor.execute("DELETE FROM api_orders")
+            # Получаем текущие order_id из базы данных
+            cursor.execute("SELECT order_id, order_status FROM api_orders")
+            existing_orders = {row["order_id"]: row["order_status"] for row in cursor.fetchall()}
             
-            # Сохраняем каждый заказ
+            # Новые order_id из полученного списка
+            new_order_ids = [order.order_id for order in api_orders]
+            
+            # Определяем заказы, которые нужно пометить как устаревшие
+            # (они есть в базе, но отсутствуют в новом списке)
+            obsolete_order_ids = [order_id for order_id in existing_orders.keys() 
+                                if order_id not in new_order_ids]
+            
+            # Помечаем устаревшие заказы (только если они не OBSOLETE уже)
+            if obsolete_order_ids:
+                current_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+                for order_id in obsolete_order_ids:
+                    # Проверяем, не устарел ли заказ уже
+                    if existing_orders[order_id] != "OBSOLETE":
+                        cursor.execute(
+                            "UPDATE api_orders SET order_status = 'OBSOLETE', order_status_description = ? WHERE order_id = ?",
+                            (f"Устарел {current_time}", order_id)
+                        )
+                logger.info(f"Помечено устаревших заказов: {len(obsolete_order_ids)}")
+            
+            # Явно удаляем заказы с баферами без значений, таких как READY
             for order in api_orders:
-                cursor.execute("""
-                    INSERT INTO api_orders (
-                        order_id, order_status, created_timestamp,
-                        total_quantity, num_of_products, product_group_type,
-                        signed, verified, buffers
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    order.order_id, order.order_status, order.created_timestamp,
-                    order.total_quantity, order.num_of_products, order.product_group_type,
-                    order.signed, order.verified, json.dumps(order.buffers)
-                ))
+                if not order.buffers and order.order_status == "READY":
+                    # Если в ответе сервера буферы не определены, но статус READY,
+                    # проверим наличие такого заказа в базе
+                    cursor.execute(
+                        "SELECT buffers FROM api_orders WHERE order_id = ? AND order_status = 'READY'",
+                        (order.order_id,)
+                    )
+                    existing_order = cursor.fetchone()
+                    
+                    if existing_order and existing_order["buffers"]:
+                        # Если заказ уже есть и в нем есть буферы, сохраняем их
+                        try:
+                            existing_buffers = json.loads(existing_order["buffers"])
+                            if existing_buffers:
+                                # Используем существующие буферы
+                                order.buffers = existing_buffers
+                                logger.info(f"Для заказа {order.order_id} использованы существующие буферы")
+                        except:
+                            logger.warning(f"Не удалось десериализовать буферы для {order.order_id}")
+            
+            # Добавляем новые заказы и обновляем существующие
+            for order in api_orders:
+                # Проверяем, существует ли заказ с таким order_id
+                cursor.execute(
+                    "SELECT id FROM api_orders WHERE order_id = ?",
+                    (order.order_id,)
+                )
+                existing_order = cursor.fetchone()
+                
+                # Преобразуем буферы в JSON для хранения
+                buffers_json = json.dumps(order.buffers)
+                
+                if existing_order:
+                    # Обновляем существующий заказ
+                    cursor.execute("""
+                        UPDATE api_orders SET 
+                            order_status = ?,
+                            order_status_description = NULL,
+                            created_timestamp = ?,
+                            total_quantity = ?,
+                            num_of_products = ?,
+                            product_group_type = ?,
+                            signed = ?,
+                            verified = ?,
+                            buffers = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE order_id = ?
+                    """, (
+                        order.order_status,
+                        order.created_timestamp,
+                        order.total_quantity,
+                        order.num_of_products,
+                        order.product_group_type,
+                        order.signed,
+                        order.verified,
+                        buffers_json,
+                        order.order_id
+                    ))
+                else:
+                    # Добавляем новый заказ
+                    cursor.execute("""
+                        INSERT INTO api_orders (
+                            order_id, order_status, created_timestamp,
+                            total_quantity, num_of_products, product_group_type,
+                            signed, verified, buffers, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """, (
+                        order.order_id, order.order_status, order.created_timestamp,
+                        order.total_quantity, order.num_of_products, order.product_group_type,
+                        order.signed, order.verified, buffers_json
+                    ))
             
             # Явно сохраняем изменения
             self.conn.commit()
             
-            return api_orders
+            # Получаем и возвращаем обновленный список заказов
+            return self.get_api_orders()
             
         except Exception as e:
             logger.error(f"Ошибка при сохранении API заказов: {str(e)}")
@@ -1551,45 +1625,79 @@ class Database:
     
     def get_api_orders(self) -> List[APIOrder]:
         """Получение списка API заказов из базы данных"""
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM api_orders ORDER BY created_timestamp DESC")
-        rows = cursor.fetchall()
-        
-        api_orders = []
-        for row in rows:
-            # Создаем объект API заказа
-            api_order = APIOrder(
-                order_id=row["order_id"],
-                order_status=row["order_status"],
-                created_timestamp=row["created_timestamp"],
-                total_quantity=row["total_quantity"],
-                num_of_products=row["num_of_products"],
-                product_group_type=row["product_group_type"],
-                signed=row["signed"],
-                verified=row["verified"]
-            )
-            api_order.id = row["id"]
+        try:
+            # Сначала проверим колонки в таблице
+            cursor = self.conn.cursor()
+            cursor.execute("PRAGMA table_info(api_orders)")
+            columns = cursor.fetchall()
+            column_names = [column["name"] for column in columns]
             
-            # Получаем буферы для этого заказа
-            cursor.execute(
-                "SELECT * FROM api_order_buffers WHERE api_order_id = ?",
-                (api_order.id,)
-            )
-            buffer_rows = cursor.fetchall()
+            # Добавим отсутствующие колонки, если это необходимо
+            schema_updated = False
+            if "order_status_description" not in column_names:
+                cursor.execute("ALTER TABLE api_orders ADD COLUMN order_status_description TEXT")
+                schema_updated = True
             
-            buffers = []
-            for buffer_row in buffer_rows:
-                buffers.append({
-                    "bufferId": buffer_row["buffer_id"],
-                    "gtin": buffer_row["gtin"],
-                    "quantity": buffer_row["quantity"],
-                    "capacity": buffer_row["capacity"]
-                })
+            if "updated_at" not in column_names:
+                cursor.execute("ALTER TABLE api_orders ADD COLUMN updated_at TIMESTAMP")
+                schema_updated = True
+                
+            if "buffers" not in column_names:
+                cursor.execute("ALTER TABLE api_orders ADD COLUMN buffers TEXT")
+                schema_updated = True
+                
+            if schema_updated:
+                self.conn.commit()
+                logger.info("Автоматическое обновление схемы таблицы api_orders завершено")
             
-            api_order.buffers = buffers
-            api_orders.append(api_order)
-        
-        return api_orders
+            # Затем выполним запрос к таблице
+            cursor.execute("SELECT * FROM api_orders ORDER BY created_timestamp DESC")
+            rows = cursor.fetchall()
+            
+            api_orders = []
+            for row in rows:
+                try:
+                    # Десериализуем буферы из JSON
+                    buffers = []
+                    if "buffers" in row.keys() and row["buffers"]:
+                        try:
+                            buffers = json.loads(row["buffers"])
+                        except json.JSONDecodeError:
+                            logger.warning(f"Не удалось десериализовать буферы для заказа {row['order_id']}")
+                    
+                    # Получаем дополнительные поля, если они есть
+                    order_status_description = None
+                    if "order_status_description" in row.keys():
+                        order_status_description = row["order_status_description"]
+                    
+                    updated_at = None
+                    if "updated_at" in row.keys():
+                        updated_at = row["updated_at"]
+                    
+                    # Создаем объект API заказа
+                    api_order = APIOrder(
+                        order_id=row["order_id"],
+                        order_status=row["order_status"],
+                        created_timestamp=row["created_timestamp"],
+                        total_quantity=row["total_quantity"],
+                        num_of_products=row["num_of_products"],
+                        product_group_type=row["product_group_type"],
+                        signed=row["signed"],
+                        verified=row["verified"],
+                        buffers=buffers,
+                        order_status_description=order_status_description,
+                        updated_at=updated_at
+                    )
+                    api_order.id = row["id"]
+                    api_orders.append(api_order)
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка при загрузке API заказа {row.get('order_id', 'Unknown')}: {str(e)}")
+            
+            return api_orders
+        except Exception as e:
+            logger.error(f"Ошибка при получении списка API заказов: {str(e)}")
+            return []
     
     def delete_api_order(self, order_id: str) -> bool:
         """Удаление API заказа из базы данных"""
@@ -1597,6 +1705,87 @@ class Database:
         cursor.execute("DELETE FROM api_orders WHERE order_id = ?", (order_id,))
         self.conn.commit()
         return cursor.rowcount > 0
+    
+    def migrate_api_order_structure(self):
+        """Миграция структуры API заказов из старой (с отдельной таблицей буферов) в новую (с буферами в JSON)"""
+        try:
+            cursor = self.conn.cursor()
+            
+            # Проверяем наличие колонок в таблице api_orders
+            cursor.execute("PRAGMA table_info(api_orders)")
+            columns = cursor.fetchall()
+            column_names = [column["name"] for column in columns]
+            
+            # Добавляем колонку buffers, если ее нет
+            if "buffers" not in column_names:
+                cursor.execute("ALTER TABLE api_orders ADD COLUMN buffers TEXT")
+                logger.info("Добавлена колонка buffers в таблицу api_orders")
+            
+            # Добавляем колонку order_status_description, если ее нет
+            if "order_status_description" not in column_names:
+                cursor.execute("ALTER TABLE api_orders ADD COLUMN order_status_description TEXT")
+                logger.info("Добавлена колонка order_status_description в таблицу api_orders")
+            
+            # Добавляем колонку updated_at, если ее нет
+            if "updated_at" not in column_names:
+                cursor.execute("ALTER TABLE api_orders ADD COLUMN updated_at TIMESTAMP")
+                logger.info("Добавлена колонка updated_at в таблицу api_orders")
+                
+            # Проверяем наличие таблицы api_order_buffers
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='api_order_buffers'")
+            if cursor.fetchone():
+                logger.info("Обнаружена устаревшая таблица api_order_buffers, выполняется миграция данных")
+                
+                # Получаем все заказы
+                cursor.execute("SELECT id, order_id FROM api_orders")
+                orders = cursor.fetchall()
+                
+                for order in orders:
+                    order_id = order["id"]
+                    
+                    # Получаем буферы для этого заказа
+                    cursor.execute("SELECT * FROM api_order_buffers WHERE api_order_id = ?", (order_id,))
+                    buffer_rows = cursor.fetchall()
+                    
+                    if buffer_rows:
+                        # Преобразуем буферы в новый формат
+                        buffers = []
+                        for buffer_row in buffer_rows:
+                            buffer = {
+                                "orderId": order["order_id"],
+                                "gtin": buffer_row["gtin"],
+                                "leftInBuffer": -1,
+                                "poolsExhausted": False,
+                                "totalCodes": -1,
+                                "unavailableCodes": -1,
+                                "availableCodes": -1,
+                                "totalPassed": -1,
+                                "omsId": ""
+                            }
+                            buffers.append(buffer)
+                        
+                        # Сохраняем буферы в JSON формате
+                        buffers_json = json.dumps(buffers)
+                        cursor.execute("UPDATE api_orders SET buffers = ? WHERE id = ?", (buffers_json, order_id))
+                
+                # Обновляем updated_at для всех заказов
+                cursor.execute("UPDATE api_orders SET updated_at = CURRENT_TIMESTAMP")
+                
+                # Сохраняем изменения
+                self.conn.commit()
+                logger.info("Миграция данных буферов завершена")
+                
+                # Удаляем устаревшую таблицу
+                cursor.execute("DROP TABLE api_order_buffers")
+                self.conn.commit()
+                logger.info("Устаревшая таблица api_order_buffers удалена")
+            
+            # Сохраняем изменения, если произошли какие-либо изменения в структуре
+            self.conn.commit()
+            
+        except Exception as e:
+            logger.error(f"Ошибка при миграции структуры API заказов: {str(e)}")
+            # Продолжаем выполнение, так как это не критическая ошибка
     
     def __del__(self):
         """Закрытие соединения с базой данных при уничтожении объекта"""

@@ -71,9 +71,11 @@ class APIOrder:
     """Модель для представления заказов из API"""
     def __init__(self, order_id: str, order_status: str, created_timestamp: str,
                  total_quantity: int, num_of_products: int, product_group_type: str,
-                 signed: bool, verified: bool, buffers: List = None):
+                 signed: bool, verified: bool, buffers: List = None, 
+                 order_status_description: str = None, updated_at: str = None):
         self.order_id = order_id
         self.order_status = order_status
+        self.order_status_description = order_status_description
         self.created_timestamp = created_timestamp
         self.total_quantity = total_quantity
         self.num_of_products = num_of_products
@@ -81,4 +83,5 @@ class APIOrder:
         self.signed = signed
         self.verified = verified
         self.buffers = buffers or []
+        self.updated_at = updated_at
         self.id = None  # ID в локальной базе данных 
