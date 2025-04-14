@@ -330,10 +330,17 @@ class DisplayCodesDialog(QDialog):
         info_layout.addStretch()
         layout.addLayout(info_layout)
         
+        # Обрабатываем коды для отображения, заменяя символы GS1 на понятное представление
+        display_codes = []
+        for code in codes:
+            # Заменяем символ GS1 на видимое текстовое представление для отображения
+            display_code = code.replace('\u001d', '[GS]')
+            display_codes.append(display_code)
+        
         # Текстовое поле с кодами
         self.codes_text = QTextEdit()
         self.codes_text.setReadOnly(True)
-        self.codes_text.setText("\n".join(codes))
+        self.codes_text.setText("\n".join(display_codes))
         layout.addWidget(self.codes_text)
         
         # Кнопки действий
@@ -351,6 +358,11 @@ class DisplayCodesDialog(QDialog):
         
         layout.addLayout(buttons_layout)
         
+        # Добавляем информационное сообщение о символах GS1
+        info_label = QLabel("Примечание: символы GS1 (Control Character 29) отображаются как [GS], но при экспорте или копировании будут восстановлены оригинальные символы.")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
         # Стандартные кнопки диалога
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -362,9 +374,25 @@ class DisplayCodesDialog(QDialog):
     def copy_to_clipboard(self):
         """Копирование кодов в буфер обмена"""
         from PyQt6.QtWidgets import QApplication
-        clipboard = QApplication.clipboard()
-        clipboard.setText(self.codes_text.toPlainText())
-        QMessageBox.information(self, "Информация", "Коды скопированы в буфер обмена")
+        
+        try:
+            # Восстанавливаем реальные символы GS1 перед копированием в буфер обмена
+            processed_codes = []
+            for code in self.codes:
+                # Проверяем наличие текстового представления символа GS1
+                if '[GS]' in code:
+                    # Заменяем текстовое представление на фактический символ GS1 (ASCII 29, \u001d)
+                    processed_code = code.replace('[GS]', '\u001d')
+                else:
+                    processed_code = code
+                processed_codes.append(processed_code)
+            
+            # Копируем в буфер обмена
+            clipboard = QApplication.clipboard()
+            clipboard.setText("\n".join(processed_codes))
+            QMessageBox.information(self, "Информация", "Коды скопированы в буфер обмена")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось скопировать коды в буфер обмена: {str(e)}")
     
     def export_to_file(self):
         """Экспорт кодов в файл"""
@@ -378,8 +406,19 @@ class DisplayCodesDialog(QDialog):
             return
         
         try:
+            # Восстанавливаем реальные символы GS1 перед записью в файл
+            processed_codes = []
+            for code in self.codes:
+                # Проверяем наличие текстового представления символа GS1
+                if '[GS]' in code:
+                    # Заменяем текстовое представление на фактический символ GS1 (ASCII 29, \u001d)
+                    processed_code = code.replace('[GS]', '\u001d')
+                else:
+                    processed_code = code
+                processed_codes.append(processed_code)
+            
             with open(filepath, 'w', encoding='utf-8') as f:
-                f.write("\n".join(self.codes))
+                f.write("\n".join(processed_codes))
             QMessageBox.information(self, "Информация", f"Коды успешно экспортированы в файл: {filepath}")
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить файл: {str(e)}")

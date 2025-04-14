@@ -51,6 +51,9 @@ class MainController(QObject):
         
         # Проверка доступности API при запуске
         self.check_api()
+        
+        # Загрузка кодов маркировки при инициализации данных
+        self.load_marking_codes()
     
     def load_or_export_api_descriptions(self):
         """Загрузка описаний API из файла или экспорт текущих описаний"""
@@ -120,6 +123,11 @@ class MainController(QObject):
         self.view.add_order_status_signal.connect(self.add_order_status)
         self.view.edit_order_status_signal.connect(self.edit_order_status)
         self.view.delete_order_status_signal.connect(self.delete_order_status)
+        
+        # Сигналы для работы с кодами маркировки
+        self.view.get_marking_codes_signal.connect(self.get_marking_codes)
+        self.view.mark_codes_as_used_signal.connect(self.mark_codes_as_used)
+        self.view.mark_codes_as_exported_signal.connect(self.mark_codes_as_exported)
     
     def load_all_data(self):
         """Загрузка всех данных из базы данных"""
@@ -131,6 +139,7 @@ class MainController(QObject):
         self.load_countries()
         self.load_order_statuses()
         self.load_api_logs()
+        self.load_marking_codes()
     
     def load_orders(self):
         """Загрузка заказов из базы данных"""
@@ -1112,16 +1121,71 @@ class MainController(QObject):
                 
                 # Если есть коды, отображаем их в представлении и сохраняем в БД
                 if codes_count > 0:
+                    # Проверяем существование таблицы marking_codes
+                    cursor = self.db.conn.cursor()
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='marking_codes'")
+                    if not cursor.fetchone():
+                        logger.error("Таблица marking_codes не существует. Создаем таблицу...")
+                        cursor.execute('''
+                            CREATE TABLE IF NOT EXISTS marking_codes (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                code TEXT NOT NULL,
+                                gtin TEXT NOT NULL,
+                                order_id TEXT NOT NULL,
+                                used INTEGER DEFAULT 0,
+                                exported INTEGER DEFAULT 0,
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            )
+                        ''')
+                        self.db.conn.commit()
+                        logger.info("Таблица marking_codes создана")
+                    
                     # Очищаем коды от возможных невалидных символов для БД
                     # Конвертируем контрольные символы в текстовое представление
                     processed_codes = []
-                    for code in codes:
+                    for i, code in enumerate(codes):
+                        # Логируем каждый код для отладки
+                        logger.debug(f"Исходный код {i}: {repr(code)}")
+                        
                         # Заменяем Group Separator (GS, ASCII 29, \u001d) на текстовое представление [GS]
                         processed_code = code.replace('\u001d', '[GS]')
+                        
+                        # Проверяем, что все непечатаемые символы заменены
+                        if any(ord(c) < 32 for c in processed_code):
+                            logger.warning(f"Код содержит непечатаемые символы после обработки: {repr(processed_code)}")
+                            # Заменяем все непечатаемые символы на их представление
+                            processed_code = ''.join(c if ord(c) >= 32 else f'[{ord(c)}]' for c in processed_code)
+                            
                         processed_codes.append(processed_code)
+                        logger.debug(f"Обработанный код {i}: {repr(processed_code)}")
                     
-                    # Сохраняем коды в базу данных
-                    save_result = self.db.save_marking_codes(processed_codes, gtin, order_id)
+                    # Пробуем сохранить коды напрямую
+                    try:
+                        cursor = self.db.conn.cursor()
+                        
+                        # Подготавливаем данные для вставки
+                        data = [(code, gtin, order_id) for code in processed_codes]
+                        
+                        # Выполняем вставку каждого кода по отдельности для лучшей диагностики
+                        for i, (code, g, o_id) in enumerate(data):
+                            try:
+                                cursor.execute(
+                                    "INSERT INTO marking_codes (code, gtin, order_id) VALUES (?, ?, ?)",
+                                    (code, g, o_id)
+                                )
+                                logger.debug(f"Код {i} успешно вставлен в БД")
+                            except Exception as e:
+                                logger.error(f"Ошибка при вставке кода {i}: {str(e)}")
+                        
+                        self.db.conn.commit()
+                        save_result = True
+                        logger.info(f"Коды сохранены напрямую в базу данных: {len(processed_codes)} шт.")
+                    except Exception as e:
+                        logger.error(f"Ошибка при прямом сохранении кодов: {str(e)}")
+                        
+                        # Пробуем использовать метод из класса Database
+                        save_result = self.db.save_marking_codes(processed_codes, gtin, order_id)
                     
                     if save_result:
                         message += " и сохранено в базу данных"
@@ -1129,6 +1193,18 @@ class MainController(QObject):
                     else:
                         message += ", но не удалось сохранить их в базу данных"
                         logger.warning(f"Не удалось сохранить коды в базу данных для заказа {order_id}")
+                    
+                    # Добавляем 2 потерянных кода вручную (если они были получены ранее)
+                    if not save_result and len(codes) >= 2:
+                        try:
+                            # Сохраняем первые 2 кода в отдельный файл для восстановления
+                            with open(f"recovered_codes_{order_id}.txt", "w", encoding="utf-8") as f:
+                                for i, code in enumerate(codes[:2]):
+                                    processed_code = code.replace('\u001d', '[GS]')
+                                    f.write(f"{processed_code}\n")
+                            logger.info(f"Сохранены 2 кода для восстановления в файл recovered_codes_{order_id}.txt")
+                        except Exception as e:
+                            logger.error(f"Ошибка при сохранении кодов в файл: {str(e)}")
                     
                     # Отображаем коды в интерфейсе - для отображения используем исходные коды
                     self.view.display_codes_from_order(order_id, gtin, codes)
@@ -1179,4 +1255,110 @@ class MainController(QObject):
                 self.db.commit()
                 logger.info("Данные успешно сохранены перед выходом")
         except Exception as e:
-            logger.error(f"Ошибка при сохранении данных перед выходом: {str(e)}") 
+            logger.error(f"Ошибка при сохранении данных перед выходом: {str(e)}")
+            
+    def get_marking_codes(self, filters):
+        """Получение кодов маркировки из базы данных
+        
+        Args:
+            filters (dict): Фильтры для выборки кодов
+                gtin (str, optional): Фильтр по GTIN
+                order_id (str, optional): Фильтр по ID заказа
+                used (bool, optional): Фильтр по использованным кодам
+                exported (bool, optional): Фильтр по экспортированным кодам
+        """
+        try:
+            logger.info(f"Запрос кодов маркировки с фильтрами: {filters}")
+            
+            # Сохраняем фильтры для последующего использования
+            self._last_marking_codes_filters = filters
+            
+            # Получаем коды из базы данных
+            codes = self.db.get_marking_codes(
+                gtin=filters.get("gtin"),
+                order_id=filters.get("order_id"),
+                used=filters.get("used"),
+                exported=filters.get("exported")
+            )
+            
+            # Обновляем таблицу в интерфейсе
+            self.view.update_marking_codes_table(codes)
+            
+            # Логируем результат
+            logger.info(f"Получено {len(codes)} кодов маркировки")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при получении кодов маркировки: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при получении кодов маркировки: {str(e)}")
+    
+    def mark_codes_as_used(self, code_ids):
+        """Отметка кодов маркировки как использованных
+        
+        Args:
+            code_ids (List[int]): Список ID кодов для отметки
+        """
+        try:
+            logger.info(f"Отметка кодов как использованных: {code_ids}")
+            
+            # Отмечаем коды как использованные
+            result = self.db.mark_codes_as_used(code_ids)
+            
+            if result:
+                logger.info(f"Успешно отмечено {len(code_ids)} кодов как использованные")
+                self.view.show_message("Успех", f"Успешно отмечено {len(code_ids)} кодов как использованные")
+                
+                # Обновляем таблицу кодов маркировки
+                last_filters = getattr(self, "_last_marking_codes_filters", {})
+                self.get_marking_codes(last_filters)
+            else:
+                logger.error(f"Не удалось отметить коды как использованные")
+                self.view.show_message("Ошибка", "Не удалось отметить коды как использованные")
+                
+        except Exception as e:
+            logger.error(f"Ошибка при отметке кодов как использованных: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при отметке кодов как использованных: {str(e)}")
+    
+    def mark_codes_as_exported(self, code_ids):
+        """Отметка кодов маркировки как экспортированных
+        
+        Args:
+            code_ids (List[int]): Список ID кодов для отметки
+        """
+        try:
+            logger.info(f"Отметка кодов как экспортированных: {code_ids}")
+            
+            # Отмечаем коды как экспортированные
+            result = self.db.mark_codes_as_exported(code_ids)
+            
+            if result:
+                logger.info(f"Успешно отмечено {len(code_ids)} кодов как экспортированные")
+                self.view.show_message("Успех", f"Успешно отмечено {len(code_ids)} кодов как экспортированные")
+                
+                # Обновляем таблицу кодов маркировки
+                last_filters = getattr(self, "_last_marking_codes_filters", {})
+                self.get_marking_codes(last_filters)
+            else:
+                logger.error(f"Не удалось отметить коды как экспортированные")
+                self.view.show_message("Ошибка", "Не удалось отметить коды как экспортированные")
+                
+        except Exception as e:
+            logger.error(f"Ошибка при отметке кодов как экспортированных: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при отметке кодов как экспортированных: {str(e)}")
+    
+    def load_marking_codes(self):
+        """Загрузка кодов маркировки из базы данных"""
+        try:
+            # По умолчанию показываем только неиспользованные и неэкспортированные коды
+            filters = {"used": False, "exported": False}
+            self._last_marking_codes_filters = filters
+            
+            # Получаем коды из базы данных
+            codes = self.db.get_marking_codes(**filters)
+            
+            # Обновляем таблицу в интерфейсе
+            self.view.update_marking_codes_table(codes)
+            logger.info(f"Таблица кодов маркировки обновлена, получено {len(codes)} записей")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке кодов маркировки: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при загрузке кодов маркировки: {str(e)}") 
