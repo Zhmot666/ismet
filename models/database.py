@@ -1437,8 +1437,9 @@ class Database:
             # Получаем ID добавленного статуса
             status_id = cursor.lastrowid
             
-            # Явно сохраняем изменения
+            # Явно сохраняем изменения, используя два метода для надежности
             self.conn.commit()
+            self.commit()  # Дополнительный вызов через наш метод с логированием
             
             # Создаем и возвращаем объект статуса
             return OrderStatus(
@@ -1475,8 +1476,9 @@ class Database:
                 WHERE id = ?
             """, (code, name, description, status_id))
             
-            # Явно сохраняем изменения
+            # Явно сохраняем изменения, используя два метода для надежности
             self.conn.commit()
+            self.commit()  # Дополнительный вызов через наш метод с логированием
             
             # Создаем и возвращаем объект статуса
             return OrderStatus(
@@ -1496,8 +1498,9 @@ class Database:
             cursor = self.conn.cursor()
             cursor.execute("DELETE FROM order_statuses WHERE id = ?", (status_id,))
             
-            # Явно сохраняем изменения
+            # Явно сохраняем изменения, используя два метода для надежности
             self.conn.commit()
+            self.commit()  # Дополнительный вызов через наш метод с логированием
             
         except Exception as e:
             logger.error(f"Ошибка при удалении статуса заказа: {str(e)}")

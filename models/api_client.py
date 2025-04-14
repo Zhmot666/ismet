@@ -635,6 +635,101 @@ class APIClient:
             self.log_request("POST", url, request_body, None)
             raise
 
+    def get_codes_from_order(self, order_id: str, gtin: str, quantity: int, last_block_id: Optional[str] = None) -> Dict[str, Any]:
+        """Получить КМ из заказа
+        
+        Этот метод позволяет получить массив кодов для заказа. При обращении к этому
+        методу исключена возможность перепечатки через интерфейс пользователя.
+        
+        Args:
+            order_id (str): Идентификатор заказа на эмиссию
+            gtin (str): GTIN товара, для которого запрашиваются коды
+            quantity (int): Количество запрашиваемых кодов (не более 150000)
+            last_block_id (str, optional): Идентификатор последнего полученного блока кодов,
+                                          используется для пагинации
+                                          
+        Returns:
+            Dict[str, Any]: Результат запроса с кодами маркировки
+            
+        Raises:
+            ValueError: Если параметры запроса не соответствуют требованиям API
+            requests.RequestException: Если возникла ошибка при отправке запроса
+        """
+        # Проверяем наличие токена
+        headers = self.get_headers()
+        if not headers.get('clientToken'):
+            raise ValueError("Отсутствует токен аутентификации (clientToken). Необходимо настроить учетные данные.")
+            
+        # Проверяем наличие omsId
+        if not self.omsid:
+            raise ValueError("Отсутствует идентификатор СУЗ (omsId). Необходимо настроить учетные данные.")
+        
+        # Проверка обязательных параметров
+        if not order_id:
+            raise ValueError("Отсутствует обязательный параметр 'order_id'")
+            
+        if not gtin or not isinstance(gtin, str) or not gtin.isdigit() or len(gtin) != 14:
+            raise ValueError("GTIN должен быть строкой из 14 цифр")
+            
+        if not isinstance(quantity, int) or quantity <= 0 or quantity > 150000:
+            raise ValueError("Количество КМ должно быть целым числом от 1 до 150000")
+        
+        # Формируем параметры запроса
+        params = {
+            "omsId": self.omsid,
+            "orderId": order_id,
+            "gtin": gtin,
+            "quantity": str(quantity)
+        }
+        
+        # Добавляем lastBlockId если он передан
+        if last_block_id:
+            params["lastBlockId"] = last_block_id
+            
+        # Строим URL для запроса
+        url = f"{self.base_url}/api/v2/{self.extension}/codes"
+        
+        # Для логирования описание метода
+        description = "Получение КМ из заказа"
+        
+        logger.info(f"Запрос КМ из заказа. URL: {url}, Параметры: {params}")
+        
+        try:
+            # Используем метод get для выполнения запроса
+            response_data, status_code = self.get(
+                url=url, 
+                params=params,
+                headers=headers,
+                description=description
+            )
+            
+            # Проверяем наличие ошибок в ответе
+            if status_code >= 400 or not response_data.get("success", False):
+                error_message = "Ошибка при получении КМ из заказа: "
+                if "globalErrors" in response_data:
+                    error_message += ", ".join(response_data["globalErrors"])
+                elif "error" in response_data:
+                    if isinstance(response_data["error"], dict):
+                        error_message += response_data["error"].get("message", "Неизвестная ошибка")
+                    else:
+                        error_message += str(response_data["error"])
+                else:
+                    error_message += f"Код ответа {status_code}"
+                
+                logger.warning(error_message)
+            
+            # Добавим обновление словаря описаний методов API
+            method_key = f"GET:/api/v2/{self.extension}/codes"
+            if method_key not in self.method_descriptions:
+                self.method_descriptions[method_key] = "Получение КМ из заказа"
+            
+            return response_data
+            
+        except requests.RequestException as e:
+            error_message = f"Ошибка соединения при получении КМ из заказа: {str(e)}"
+            logger.error(error_message)
+            raise
+
     def request(self, method: str, url: str, data: Any = None, headers: Optional[Dict[str, str]] = None, 
                 params: Optional[Dict[str, str]] = None, timeout: int = 30, 
                 description: Optional[str] = None) -> Tuple[bool, Dict[str, Any], int]:
