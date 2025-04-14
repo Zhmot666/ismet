@@ -674,34 +674,32 @@ class APIClient:
         if not isinstance(quantity, int) or quantity <= 0 or quantity > 150000:
             raise ValueError("Количество КМ должно быть целым числом от 1 до 150000")
         
-        # Формируем параметры запроса
-        params = {
-            "omsId": self.omsid,
-            "orderId": order_id,
-            "gtin": gtin,
-            "quantity": str(quantity)
-        }
+        # Формируем URL с параметрами согласно шаблону
+        url = f"{self.base_url}/api/v2/{self.extension}/codes?omsId={self.omsid}&orderId={order_id}&gtin={gtin}&quantity={quantity}"
         
         # Добавляем lastBlockId если он передан
         if last_block_id:
-            params["lastBlockId"] = last_block_id
+            url += f"&lastBlockId={last_block_id}"
             
-        # Строим URL для запроса
-        url = f"{self.base_url}/api/v2/{self.extension}/codes"
-        
         # Для логирования описание метода
         description = "Получение КМ из заказа"
         
-        logger.info(f"Запрос КМ из заказа. URL: {url}, Параметры: {params}")
+        logger.info(f"Запрос КМ из заказа. URL: {url}")
         
         try:
-            # Используем метод get для выполнения запроса
-            response_data, status_code = self.get(
-                url=url, 
-                params=params,
-                headers=headers,
-                description=description
-            )
+            # Выполняем GET-запрос напрямую, так как параметры уже в URL
+            response = self.session.get(url, headers=headers, timeout=30)
+            
+            # Логируем запрос
+            self.log_request("GET", url, None, response, description)
+            
+            # Пытаемся получить JSON из ответа
+            try:
+                response_data = response.json()
+            except ValueError:
+                response_data = {"content": str(response.content)}
+            
+            status_code = response.status_code
             
             # Проверяем наличие ошибок в ответе
             if status_code >= 400 or not response_data.get("success", False):
@@ -843,7 +841,8 @@ class APIClient:
         Returns:
             Tuple[Dict, int]: Ответ сервера и код ответа
         """
-        return self.request("GET", url, params=params, headers=headers, description=description)
+        success, response_data, status_code = self.request("GET", url, params=params, headers=headers, description=description)
+        return response_data, status_code
     
     def post(self, url: str, data: Dict, params: Optional[Dict] = None, 
              headers: Optional[Dict] = None, description: str = "") -> Tuple[Dict, int]:
@@ -860,7 +859,8 @@ class APIClient:
         Returns:
             Tuple[Dict, int]: Ответ сервера и код ответа
         """
-        return self.request("POST", url, data=data, params=params, headers=headers, description=description)
+        success, response_data, status_code = self.request("POST", url, data=data, params=params, headers=headers, description=description)
+        return response_data, status_code
     
     def put(self, url: str, data: Dict, params: Optional[Dict] = None, 
             headers: Optional[Dict] = None, description: str = "") -> Tuple[Dict, int]:
@@ -877,7 +877,8 @@ class APIClient:
         Returns:
             Tuple[Dict, int]: Ответ сервера и код ответа
         """
-        return self.request("PUT", url, data=data, params=params, headers=headers, description=description)
+        success, response_data, status_code = self.request("PUT", url, data=data, params=params, headers=headers, description=description)
+        return response_data, status_code
     
     def delete(self, url: str, data: Optional[Dict] = None, params: Optional[Dict] = None, 
                headers: Optional[Dict] = None, description: str = "") -> Tuple[Dict, int]:
@@ -894,4 +895,5 @@ class APIClient:
         Returns:
             Tuple[Dict, int]: Ответ сервера и код ответа
         """
-        return self.request("DELETE", url, data=data, params=params, headers=headers, description=description) 
+        success, response_data, status_code = self.request("DELETE", url, data=data, params=params, headers=headers, description=description)
+        return response_data, status_code 

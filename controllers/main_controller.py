@@ -86,6 +86,7 @@ class MainController(QObject):
         self.view.get_order_details_signal.connect(self.get_order_details)
         self.view.api_orders_signal.connect(self.get_api_orders)
         self.view.delete_api_order_signal.connect(self.delete_api_order)
+        self.view.get_km_from_order_signal.connect(self.get_km_from_order)
         
         # Сигналы вкладки подключений
         self.view.add_connection_signal.connect(self.add_connection)
@@ -1065,37 +1066,104 @@ class MainController(QObject):
     def delete_api_order(self, order_id):
         """Удаление API заказа из базы данных"""
         try:
-            # Удаляем API заказ из базы данных
-            success = self.db.delete_api_order(order_id)
+            self.db.delete_api_order(order_id)
+            logger.info(f"API заказ с ID={order_id} успешно удален")
+            self.view.show_message("Успех", f"API заказ с ID={order_id} успешно удален")
             
-            if success:
-                logger.info(f"API заказ с ID {order_id} удален из базы данных")
-                self.view.show_message("Успех", f"API заказ с ID {order_id} удален из базы данных")
-                
-                # Обновляем данные в таблице
-                self.load_api_orders_from_db()
-            else:
-                logger.warning(f"API заказ с ID {order_id} не найден в базе данных")
-                self.view.show_message("Предупреждение", f"API заказ с ID {order_id} не найден в базе данных")
-        
+            # Обновление таблицы API заказов
+            self.load_api_orders_from_db()
+            
         except Exception as e:
             logger.error(f"Ошибка при удалении API заказа: {str(e)}")
             self.view.show_message("Ошибка", f"Ошибка при удалении API заказа: {str(e)}")
     
-    def save_all_data(self):
-        """Метод для явного сохранения всех данных перед выходом из приложения"""
+    def get_km_from_order(self, order_id, gtin, quantity):
+        """Получение КМ из заказа
+        
+        Args:
+            order_id (str): Идентификатор заказа
+            gtin (str): GTIN товара
+            quantity (int): Количество запрашиваемых кодов
+            
+        Returns:
+            None: Метод отображает результат в интерфейсе
+        """
         try:
-            logger.info("Сохранение всех данных перед выходом...")
+            logger.info(f"Запрос на получение КМ из заказа: order_id={order_id}, gtin={gtin}, quantity={quantity}")
             
-            # Сохраняем состояние базы данных
-            if self.db:
-                self.db.commit()
+            # Вызываем метод API-клиента
+            response = self.api_client.get_codes_from_order(
+                order_id=order_id,
+                gtin=gtin,
+                quantity=quantity
+            )
             
-            # Можно добавить дополнительные действия по сохранению данных
-            # Например, сохранение настроек, состояния интерфейса и т.д.
+            # Проверяем успешность выполнения запроса
+            if response.get("success", False):
+                # Получаем коды маркировки из ответа
+                codes = response.get("codes", [])
+                codes_count = len(codes)
+                
+                # Формируем сообщение
+                message = f"Получено {codes_count} КМ из заказа {order_id}"
+                
+                # Если есть коды, отображаем их в представлении и сохраняем в БД
+                if codes_count > 0:
+                    # Сохраняем коды в базу данных
+                    save_result = self.db.save_marking_codes(codes, gtin, order_id)
+                    
+                    if save_result:
+                        message += " и сохранено в базу данных"
+                        logger.info(f"Коды сохранены в базу данных для заказа {order_id}")
+                    else:
+                        message += ", но не удалось сохранить их в базу данных"
+                        logger.warning(f"Не удалось сохранить коды в базу данных для заказа {order_id}")
+                    
+                    # Отображаем коды в интерфейсе
+                    self.view.display_codes_from_order(order_id, gtin, codes)
+                    logger.info(message)
+                    self.view.show_message("Успех", message)
+                else:
+                    logger.warning(f"Не удалось получить КМ из заказа {order_id}: коды отсутствуют в ответе")
+                    self.view.show_message("Предупреждение", f"Не удалось получить КМ из заказа {order_id}: коды отсутствуют в ответе")
+            else:
+                # Получаем информацию об ошибке
+                error_message = "Ошибка при получении КМ из заказа"
+                if "globalErrors" in response:
+                    error_message += ": " + ", ".join(response["globalErrors"])
+                elif "error" in response:
+                    if isinstance(response["error"], dict):
+                        error_message += ": " + response["error"].get("message", "Неизвестная ошибка")
+                    else:
+                        error_message += ": " + str(response["error"])
+                
+                logger.error(error_message)
+                self.view.show_message("Ошибка", error_message)
+                
+        except ValueError as e:
+            # Обработка ошибок валидации параметров
+            error_message = f"Ошибка валидации параметров: {str(e)}"
+            logger.error(error_message)
+            self.view.show_message("Ошибка", error_message)
             
-            logger.info("Все данные успешно сохранены")
+        except requests.RequestException as e:
+            # Обработка ошибок сети
+            error_message = f"Ошибка сети при получении КМ из заказа: {str(e)}"
+            logger.error(error_message)
+            self.view.show_message("Ошибка", error_message)
             
         except Exception as e:
-            logger.error(f"Ошибка при сохранении данных: {str(e)}")
-            # Не показываем сообщение пользователю, так как это происходит при закрытии 
+            # Обработка прочих ошибок
+            error_message = f"Неизвестная ошибка при получении КМ из заказа: {str(e)}"
+            logger.error(error_message)
+            self.view.show_message("Ошибка", error_message)
+    
+    def save_all_data(self):
+        """Сохранение всех данных перед завершением приложения"""
+        try:
+            logger.info("Сохранение данных перед выходом")
+            if self.db:
+                self.db.commit()
+                logger.info("Данные успешно сохранены перед выходом")
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении данных перед выходом: {str(e)}") 

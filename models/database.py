@@ -186,113 +186,95 @@ class Database:
         self.insert_default_order_statuses()
     
     def create_tables(self):
-        """Создание таблиц в базе данных"""
+        """Создание таблиц в базе данных если они не существуют"""
         cursor = self.conn.cursor()
         
-        # Таблица заказов
+        # Создаем таблицу заказов
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 order_number TEXT NOT NULL,
-                timestamp TEXT,
-                expected_complete TEXT,
                 status TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
-        # Таблица деталей заказа (товаров)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS order_products (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                order_id INTEGER,
-                gtin TEXT NOT NULL,
-                quantity INTEGER NOT NULL,
-                FOREIGN KEY (order_id) REFERENCES orders (id)
-            )
-        ''')
-        
-        # Таблица подключений
+        # Создаем таблицу подключений к API
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS connections (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 url TEXT NOT NULL,
-                is_active INTEGER DEFAULT 0
+                is_active INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
-        # Таблица учетных данных
+        # Создаем таблицу учетных данных
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS credentials (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 omsid TEXT NOT NULL,
                 token TEXT NOT NULL,
-                gln TEXT DEFAULT ''
+                gln TEXT,
+                connection_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (connection_id) REFERENCES connections (id)
             )
         ''')
         
-        # Таблица номенклатуры
+        # Создаем таблицу номенклатуры
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS nomenclature (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
-                gtin TEXT NOT NULL,
-                product_group TEXT DEFAULT ""
+                gtin TEXT NOT NULL UNIQUE,
+                product_group TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
-        # Таблица расширений API (категорий продукции)
+        # Создаем таблицу расширений API
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS extensions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 code TEXT NOT NULL,
                 name TEXT NOT NULL,
-                is_active INTEGER DEFAULT 0
+                description TEXT,
+                is_active INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
-        # Таблица типов эмиссии (способов выпуска товара)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS emission_types (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                code TEXT NOT NULL,
-                name TEXT NOT NULL,
-                product_group TEXT
-            )
-        ''')
-        
-        # Таблица стран мира
+        # Создаем таблицу стран
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS countries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                code TEXT NOT NULL UNIQUE,
+                code TEXT NOT NULL,
                 name TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
-        # Таблица статусов заказов
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS order_statuses (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                code TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL,
-                description TEXT
-            )
-        ''')
-        
-        # Таблица настроек
+        # Создаем таблицу настроек
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS settings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 key TEXT NOT NULL UNIQUE,
-                value TEXT NOT NULL
+                value TEXT,
+                description TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
-        # Таблица логов API
+        # Создаем таблицу логов API
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS api_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -304,6 +286,45 @@ class Database:
                 success INTEGER DEFAULT 1,
                 description TEXT,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Создаем таблицу API заказов
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS api_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id TEXT NOT NULL UNIQUE,
+                order_data TEXT NOT NULL,
+                buffers TEXT,
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Создаем таблицу статусов заказов
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS order_statuses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                description TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Создаем таблицу кодов маркировки
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS marking_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL,
+                gtin TEXT NOT NULL,
+                order_id TEXT NOT NULL,
+                used INTEGER DEFAULT 0,
+                exported INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
@@ -1809,3 +1830,148 @@ class Database:
         if hasattr(self, 'conn') and self.conn:
             self.conn.commit()
             logger.info("Изменения вручную сохранены в базу данных")
+    
+    def save_marking_codes(self, codes, gtin, order_id):
+        """Сохранение кодов маркировки в базу данных
+        
+        Args:
+            codes (List[str]): Список кодов маркировки
+            gtin (str): GTIN товара
+            order_id (str): Идентификатор заказа
+            
+        Returns:
+            bool: True, если коды успешно сохранены
+        """
+        try:
+            cursor = self.conn.cursor()
+            
+            # Подготавливаем данные для вставки
+            data = [(code, gtin, order_id) for code in codes]
+            
+            # Выполняем массовую вставку
+            cursor.executemany(
+                "INSERT INTO marking_codes (code, gtin, order_id) VALUES (?, ?, ?)",
+                data
+            )
+            
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении кодов маркировки: {str(e)}")
+            return False
+    
+    def get_marking_codes(self, gtin=None, order_id=None, used=None, exported=None, limit=1000):
+        """Получение кодов маркировки из базы данных
+        
+        Args:
+            gtin (str, optional): Фильтр по GTIN
+            order_id (str, optional): Фильтр по ID заказа
+            used (bool, optional): Фильтр по использованным кодам
+            exported (bool, optional): Фильтр по экспортированным кодам
+            limit (int, optional): Максимальное количество возвращаемых кодов
+            
+        Returns:
+            List[Dict]: Список словарей с данными кодов маркировки
+        """
+        try:
+            cursor = self.conn.cursor()
+            
+            # Строим запрос с условиями
+            query = "SELECT id, code, gtin, order_id, used, exported, created_at FROM marking_codes WHERE 1=1"
+            params = []
+            
+            if gtin:
+                query += " AND gtin = ?"
+                params.append(gtin)
+            
+            if order_id:
+                query += " AND order_id = ?"
+                params.append(order_id)
+            
+            if used is not None:
+                query += " AND used = ?"
+                params.append(1 if used else 0)
+            
+            if exported is not None:
+                query += " AND exported = ?"
+                params.append(1 if exported else 0)
+            
+            # Добавляем лимит
+            query += " ORDER BY id DESC LIMIT ?"
+            params.append(limit)
+            
+            # Выполняем запрос
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            
+            # Формируем результат
+            result = []
+            for row in rows:
+                result.append({
+                    "id": row[0],
+                    "code": row[1],
+                    "gtin": row[2],
+                    "order_id": row[3],
+                    "used": bool(row[4]),
+                    "exported": bool(row[5]),
+                    "created_at": row[6]
+                })
+            
+            return result
+        except Exception as e:
+            logger.error(f"Ошибка при получении кодов маркировки: {str(e)}")
+            return []
+    
+    def mark_codes_as_used(self, code_ids):
+        """Отметить коды как использованные
+        
+        Args:
+            code_ids (List[int]): Список ID кодов для отметки
+            
+        Returns:
+            bool: True, если отметка прошла успешно
+        """
+        try:
+            cursor = self.conn.cursor()
+            
+            # Формируем список параметров для запроса IN
+            placeholders = ",".join(["?"] * len(code_ids))
+            
+            # Выполняем обновление
+            cursor.execute(
+                f"UPDATE marking_codes SET used = 1, updated_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})",
+                code_ids
+            )
+            
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при отметке кодов как использованных: {str(e)}")
+            return False
+    
+    def mark_codes_as_exported(self, code_ids):
+        """Отметить коды как экспортированные
+        
+        Args:
+            code_ids (List[int]): Список ID кодов для отметки
+            
+        Returns:
+            bool: True, если отметка прошла успешно
+        """
+        try:
+            cursor = self.conn.cursor()
+            
+            # Формируем список параметров для запроса IN
+            placeholders = ",".join(["?"] * len(code_ids))
+            
+            # Выполняем обновление
+            cursor.execute(
+                f"UPDATE marking_codes SET exported = 1, updated_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})",
+                code_ids
+            )
+            
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при отметке кодов как экспортированных: {str(e)}")
+            return False

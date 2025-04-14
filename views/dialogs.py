@@ -1,9 +1,11 @@
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                             QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
                             QMessageBox, QComboBox, QGroupBox, QFormLayout, QSpinBox,
-                            QTextEdit, QDateEdit, QDialogButtonBox)
+                            QTextEdit, QDateEdit, QDialogButtonBox, QFileDialog)
 from PyQt6.QtCore import Qt, QDate
+from PyQt6.QtGui import QIcon, QPixmap
 import re
+import os
 
 class BaseDialog(QDialog):
     """Базовый класс для диалоговых окон"""
@@ -223,6 +225,164 @@ class NomenclatureDialog(BaseDialog):
             'gtin': self.gtin_input.text(),
             'product_group': self.product_group_combo.currentData()
         }
+
+class GetKMDialog(BaseDialog):
+    """Диалог для выбора параметров получения КМ из заказа"""
+    def __init__(self, parent=None, order_id=None, gtins=None):
+        super().__init__(parent)
+        self.order_id = order_id
+        self.gtins = gtins or []
+        self.setWindowTitle(f"Получение КМ из заказа {order_id}")
+        self.resize(400, 200)
+        self.setup_ui()
+        
+    def setup_ui(self):
+        layout = QVBoxLayout()
+        
+        # Информационное сообщение
+        info_label = QLabel(f"Получение кодов маркировки из заказа {self.order_id}")
+        info_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(info_label)
+        
+        description_label = QLabel("Выберите GTIN товара и укажите количество кодов для получения.\n"
+                                  "Максимальное количество кодов в одном запросе: 150000.")
+        description_label.setStyleSheet("color: #666; font-style: italic;")
+        layout.addWidget(description_label)
+        
+        # Форма ввода параметров
+        form_layout = QFormLayout()
+        
+        # Выбор GTIN
+        self.gtin_combo = QComboBox()
+        for gtin in self.gtins:
+            self.gtin_combo.addItem(gtin, gtin)
+        form_layout.addRow("GTIN:", self.gtin_combo)
+        
+        # Поле для ввода количества кодов
+        self.quantity_spin = QSpinBox()
+        self.quantity_spin.setMinimum(1)
+        self.quantity_spin.setMaximum(150000)
+        self.quantity_spin.setValue(1000)  # По умолчанию 1000 кодов
+        form_layout.addRow("Количество КМ:", self.quantity_spin)
+        
+        layout.addLayout(form_layout)
+        
+        # Кнопки
+        buttons_layout = QHBoxLayout()
+        ok_button = QPushButton("Получить")
+        ok_button.clicked.connect(self.validate_and_accept)
+        cancel_button = QPushButton("Отмена")
+        cancel_button.clicked.connect(self.reject)
+        buttons_layout.addWidget(ok_button)
+        buttons_layout.addWidget(cancel_button)
+        layout.addLayout(buttons_layout)
+        
+        self.setLayout(layout)
+    
+    def validate_and_accept(self):
+        """Валидация введённых параметров и закрытие диалога"""
+        if not self.gtin_combo.currentText():
+            self.show_error("Необходимо выбрать GTIN товара")
+            return
+            
+        if self.quantity_spin.value() <= 0:
+            self.show_error("Количество кодов должно быть больше 0")
+            return
+            
+        if self.quantity_spin.value() > 150000:
+            self.show_error("Максимальное количество кодов в одном запросе: 150000")
+            return
+            
+        self.accept()
+    
+    def get_data(self):
+        """Получить данные из формы"""
+        return {
+            'gtin': self.gtin_combo.currentText(),
+            'quantity': self.quantity_spin.value()
+        }
+
+class DisplayCodesDialog(QDialog):
+    """Диалог для отображения и экспорта кодов маркировки"""
+    
+    def __init__(self, parent, order_id, gtin, codes):
+        """Инициализация диалога для отображения кодов маркировки
+        
+        Args:
+            parent: Родительский виджет
+            order_id (str): ID заказа
+            gtin (str): GTIN товара
+            codes (List[str]): Список кодов маркировки
+        """
+        super().__init__(parent)
+        self.setWindowTitle(f"Коды маркировки для заказа {order_id} (GTIN: {gtin})")
+        self.resize(600, 400)
+        
+        self.order_id = order_id
+        self.gtin = gtin
+        self.codes = codes
+        
+        layout = QVBoxLayout(self)
+        
+        # Информация о кодах
+        info_layout = QHBoxLayout()
+        info_layout.addWidget(QLabel(f"Количество кодов: {len(codes)}"))
+        info_layout.addStretch()
+        layout.addLayout(info_layout)
+        
+        # Текстовое поле с кодами
+        self.codes_text = QTextEdit()
+        self.codes_text.setReadOnly(True)
+        self.codes_text.setText("\n".join(codes))
+        layout.addWidget(self.codes_text)
+        
+        # Кнопки действий
+        buttons_layout = QHBoxLayout()
+        
+        # Кнопка копирования в буфер обмена
+        copy_button = QPushButton("Копировать в буфер обмена")
+        copy_button.clicked.connect(self.copy_to_clipboard)
+        buttons_layout.addWidget(copy_button)
+        
+        # Кнопка экспорта в файл
+        export_button = QPushButton("Экспортировать в файл")
+        export_button.clicked.connect(self.export_to_file)
+        buttons_layout.addWidget(export_button)
+        
+        layout.addLayout(buttons_layout)
+        
+        # Стандартные кнопки диалога
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+    
+    def copy_to_clipboard(self):
+        """Копирование кодов в буфер обмена"""
+        from PyQt6.QtWidgets import QApplication
+        clipboard = QApplication.clipboard()
+        clipboard.setText(self.codes_text.toPlainText())
+        QMessageBox.information(self, "Информация", "Коды скопированы в буфер обмена")
+    
+    def export_to_file(self):
+        """Экспорт кодов в файл"""
+        # Запрашиваем имя файла для сохранения
+        default_filename = f"codes_{self.order_id}_{self.gtin}.txt"
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Экспорт кодов", default_filename, "Текстовые файлы (*.txt)"
+        )
+        
+        if not filepath:
+            return
+        
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write("\n".join(self.codes))
+            QMessageBox.information(self, "Информация", f"Коды успешно экспортированы в файл: {filepath}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить файл: {str(e)}")
 
 class EmissionOrderDialog(QDialog):
     """Диалог для создания заказа на эмиссию кодов маркировки"""

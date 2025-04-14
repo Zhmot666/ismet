@@ -1,29 +1,46 @@
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                            QPushButton, QLabel, QTableWidget, QTableWidgetItem,
-                            QMessageBox, QLineEdit, QComboBox, QTabWidget, QSplitter, QTextEdit, QDialog, QDialogButtonBox, QInputDialog)
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QIntValidator
-from .dialogs import ConnectionDialog, CredentialsDialog, NomenclatureDialog
+from PyQt6.QtWidgets import (QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
+                         QTableWidget, QTableWidgetItem, QComboBox, QFormLayout,
+                         QLineEdit, QPushButton, QLabel, QMessageBox, QHeaderView,
+                         QCheckBox, QGroupBox, QSpinBox, QDateEdit, QFileDialog, QMenu,
+                         QDialog, QDialogButtonBox, QSplitter, QTextEdit, QInputDialog)
+from PyQt6.QtCore import Qt, QDate, pyqtSignal, QPoint
+from PyQt6.QtGui import QAction, QCursor, QColor, QIntValidator
+
+from views.dialogs import EmissionOrderDialog, DisplayCodesDialog
+from .dialogs import ConnectionDialog, CredentialsDialog, NomenclatureDialog, GetKMDialog, BaseDialog
 import logging
 import datetime
 import json
 from models.models import Extension, Nomenclature, EmissionType, Country
+from typing import List
 
 logger = logging.getLogger(__name__)
 
 class MainWindow(QMainWindow):
     """Главное окно приложения"""
+    
+    # Сигналы
+    get_orders_signal = pyqtSignal(dict)
+    get_order_details_signal = pyqtSignal(str)
+    create_order_signal = pyqtSignal(dict)
+    emit_order_signal = pyqtSignal(dict)
+    settings_signal = pyqtSignal()
+    get_registry_presets_signal = pyqtSignal()
+    get_registry_by_id_signal = pyqtSignal(str)
+    test_connection_signal = pyqtSignal()
+    check_updates_signal = pyqtSignal()
+    get_marking_codes_signal = pyqtSignal(dict)
+    get_report_signal = pyqtSignal()  # Сигнал для получения отчета
+    get_version_signal = pyqtSignal()  # Сигнал для получения версии
+    
     # Сигналы для работы с заказами
     add_order_signal = pyqtSignal(str, str)
     ping_signal = pyqtSignal()
-    get_orders_signal = pyqtSignal()
-    get_report_signal = pyqtSignal()
-    get_version_signal = pyqtSignal()  # Сигнал для запроса версии СУЗ и API
     get_orders_status_signal = pyqtSignal()  # Сигнал для получения статуса заказов
     create_emission_order_signal = pyqtSignal(dict)  # Сигнал для создания заказа на эмиссию кодов
-    get_order_details_signal = pyqtSignal(int)  # Сигнал для получения деталей заказа
     api_orders_signal = pyqtSignal()  # Сигнал для получения заказов API
     delete_api_order_signal = pyqtSignal(str)  # Сигнал для удаления API заказа
+    get_km_from_order_signal = pyqtSignal(str, str, int)  # Сигнал для получения КМ из заказа
     
     # Сигналы для работы с подключениями
     add_connection_signal = pyqtSignal(str, str)
@@ -58,6 +75,10 @@ class MainWindow(QMainWindow):
     edit_order_status_signal = pyqtSignal(int, str, str, str)  # id, code, name, description
     delete_order_status_signal = pyqtSignal(int)
     
+    # Сигналы для работы с кодами маркировки
+    mark_codes_as_used_signal = pyqtSignal(list)  # code_ids
+    mark_codes_as_exported_signal = pyqtSignal(list)  # code_ids
+    
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Управление заказами")
@@ -80,11 +101,13 @@ class MainWindow(QMainWindow):
         self.create_api_logs_tab()
         self.create_countries_tab()
         self.create_order_statuses_tab()
+        self.create_marking_codes_tab()  # Добавляем новую вкладку
         
         # Добавляем вкладки в виджет (только те, которые должны быть видны)
         self.tabs.addTab(self.orders_tab, "Заказы")
         self.tabs.addTab(self.api_orders_tab, "API Заказы")
         self.tabs.addTab(self.api_logs_tab, "Логи API")
+        self.tabs.addTab(self.marking_codes_tab, "Коды маркировки")  # Добавляем новую вкладку
         
         # Создаем панель кнопок для вызова модальных окон
         toolbar = self.addToolBar("Панель инструментов")
@@ -111,6 +134,8 @@ class MainWindow(QMainWindow):
             pass  # Обновление должно происходить только по запросу через кнопку
         elif index == 2:  # Логи API
             self.load_api_logs_signal.emit()
+        elif index == 3:  # Коды маркировки
+            self.on_apply_marking_codes_filter()
     
     def create_status_bar(self):
         """Создание строки статуса с индикатором доступности API"""
@@ -691,7 +716,7 @@ class MainWindow(QMainWindow):
             row = selected_rows[0].row()
             order_id = int(self.orders_table.item(row, 0).text())
             # Эмитируем сигнал для получения деталей заказа
-            self.get_order_details_signal.emit(order_id)
+            self.get_order_details_signal.emit(str(order_id))
     
     def update_order_details_table(self, products):
         """Обновление таблицы деталей заказа"""
@@ -1206,6 +1231,10 @@ class MainWindow(QMainWindow):
         create_order_button.clicked.connect(self.on_create_emission_order_clicked)
         buttons_layout.addWidget(create_order_button)
         
+        get_km_button = QPushButton("Получить КМ из заказа")
+        get_km_button.clicked.connect(self.on_get_km_from_order_clicked)
+        buttons_layout.addWidget(get_km_button)
+        
         delete_button = QPushButton("Удалить заказ")
         delete_button.clicked.connect(self.on_delete_api_order_clicked)
         buttons_layout.addWidget(delete_button)
@@ -1307,6 +1336,274 @@ class MainWindow(QMainWindow):
             self.order_statuses_table.setItem(row, 1, QTableWidgetItem(status.code))
             self.order_statuses_table.setItem(row, 2, QTableWidgetItem(status.name))
             self.order_statuses_table.setItem(row, 3, QTableWidgetItem(status.description))
+
+    def on_get_km_from_order_clicked(self):
+        """Обработчик нажатия кнопки получения КМ из заказа"""
+        # Получаем выбранный заказ
+        selected_rows = self.api_orders_table.selectedItems()
+        if not selected_rows:
+            QMessageBox.warning(self, "Ошибка", "Выберите заказ для получения КМ")
+            return
+            
+        row = selected_rows[0].row()
+        order_id = self.api_orders_table.item(row, 0).text()
+        
+        # Проверяем статус заказа - должен быть READY
+        status = self.api_orders_table.item(row, 1).text()
+        if status != "READY":
+            QMessageBox.warning(self, "Ошибка", 
+                f"Невозможно получить КМ из заказа со статусом '{status}'. Статус заказа должен быть 'READY'.")
+            return
+        
+        # Получаем буферы для выбранного заказа
+        gtins = []
+        try:
+            api_orders = self.db.get_api_orders()
+            for api_order in api_orders:
+                if api_order.order_id == order_id:
+                    # Собираем GTINы из буферов
+                    for buffer in api_order.buffers:
+                        gtin = buffer.get("gtin")
+                        if gtin and gtin not in gtins:
+                            gtins.append(gtin)
+                    break
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка при получении информации о буферах: {str(e)}")
+            return
+        
+        # Если GTINы не найдены, выводим сообщение
+        if not gtins:
+            QMessageBox.warning(self, "Ошибка", "Не найдены GTINы для выбранного заказа")
+            return
+            
+        # Создаем диалог для выбора GTIN и количества КМ
+        from views.dialogs import GetKMDialog
+        dialog = GetKMDialog(self, order_id, gtins)
+        
+        # Если пользователь нажал "OK", отправляем сигнал на получение КМ
+        if dialog.exec():
+            data = dialog.get_data()
+            gtin = data.get("gtin")
+            quantity = data.get("quantity")
+            
+            # Отправляем сигнал на получение КМ
+            self.get_km_from_order_signal.emit(order_id, gtin, quantity)
+    
+    def display_codes_from_order(self, order_id, gtin, codes):
+        """Отображение полученных КМ из заказа
+        
+        Args:
+            order_id (str): Идентификатор заказа
+            gtin (str): GTIN товара
+            codes (List[str]): Список кодов маркировки
+        """
+        from views.dialogs import DisplayCodesDialog
+        dialog = DisplayCodesDialog(self, order_id, gtin, codes)
+        dialog.exec()
+
+    def create_marking_codes_tab(self):
+        """Создание вкладки для просмотра кодов маркировки"""
+        self.marking_codes_tab = QWidget()
+        layout = QVBoxLayout(self.marking_codes_tab)
+        
+        # Добавляем фильтры
+        filters_layout = QHBoxLayout()
+        
+        # Фильтр по GTIN
+        gtin_layout = QHBoxLayout()
+        gtin_label = QLabel("GTIN:")
+        self.gtin_filter = QLineEdit()
+        self.gtin_filter.setPlaceholderText("Введите GTIN для фильтрации")
+        gtin_layout.addWidget(gtin_label)
+        gtin_layout.addWidget(self.gtin_filter)
+        filters_layout.addLayout(gtin_layout)
+        
+        # Фильтр по ID заказа
+        order_id_layout = QHBoxLayout()
+        order_id_label = QLabel("ID заказа:")
+        self.order_id_filter = QLineEdit()
+        self.order_id_filter.setPlaceholderText("Введите ID заказа для фильтрации")
+        order_id_layout.addWidget(order_id_label)
+        order_id_layout.addWidget(self.order_id_filter)
+        filters_layout.addLayout(order_id_layout)
+        
+        # Чекбоксы для фильтрации
+        self.used_filter = QCheckBox("Только неиспользованные")
+        self.used_filter.setChecked(True)
+        filters_layout.addWidget(self.used_filter)
+        
+        self.exported_filter = QCheckBox("Только неэкспортированные")
+        self.exported_filter.setChecked(True)
+        filters_layout.addWidget(self.exported_filter)
+        
+        # Кнопка применения фильтров
+        apply_filter_button = QPushButton("Применить фильтры")
+        apply_filter_button.clicked.connect(self.on_apply_marking_codes_filter)
+        filters_layout.addWidget(apply_filter_button)
+        
+        layout.addLayout(filters_layout)
+        
+        # Таблица кодов маркировки
+        self.marking_codes_table = QTableWidget()
+        self.marking_codes_table.setColumnCount(7)
+        self.marking_codes_table.setHorizontalHeaderLabels([
+            "ID", "Код маркировки", "GTIN", "ID заказа", "Использован", "Экспортирован", "Создан"
+        ])
+        layout.addWidget(self.marking_codes_table)
+        
+        # Кнопки управления
+        buttons_layout = QHBoxLayout()
+        
+        refresh_button = QPushButton("Обновить")
+        refresh_button.clicked.connect(self.on_refresh_marking_codes)
+        buttons_layout.addWidget(refresh_button)
+        
+        export_button = QPushButton("Экспортировать выбранные")
+        export_button.clicked.connect(self.on_export_marking_codes)
+        buttons_layout.addWidget(export_button)
+        
+        mark_used_button = QPushButton("Отметить как использованные")
+        mark_used_button.clicked.connect(self.on_mark_codes_as_used)
+        buttons_layout.addWidget(mark_used_button)
+        
+        layout.addLayout(buttons_layout)
+        
+    def on_apply_marking_codes_filter(self):
+        """Обработчик нажатия кнопки применения фильтров кодов маркировки"""
+        # Получаем значения фильтров
+        gtin = self.gtin_filter.text().strip() if self.gtin_filter.text().strip() else None
+        order_id = self.order_id_filter.text().strip() if self.order_id_filter.text().strip() else None
+        used = not self.used_filter.isChecked()  # Инвертируем, т.к. чекбокс "Только неиспользованные"
+        exported = not self.exported_filter.isChecked()  # Инвертируем, т.к. чекбокс "Только неэкспортированные"
+        
+        # Отправляем сигнал на получение кодов с фильтрами
+        self.get_marking_codes_signal.emit({"gtin": gtin, "order_id": order_id, "used": used, "exported": exported})
+    
+    def on_refresh_marking_codes(self):
+        """Обработчик нажатия кнопки обновления кодов маркировки"""
+        # Получаем текущие значения фильтров и отправляем сигнал
+        self.on_apply_marking_codes_filter()
+    
+    def on_export_marking_codes(self):
+        """Обработчик нажатия кнопки экспорта выбранных кодов маркировки"""
+        # Получаем выбранные строки
+        selected_rows = self.marking_codes_table.selectedItems()
+        if not selected_rows:
+            QMessageBox.warning(self, "Ошибка", "Не выбраны коды для экспорта")
+            return
+        
+        # Создаем список выбранных ID и кодов маркировки
+        code_ids = []
+        codes = []
+        rows = set()
+        
+        for item in selected_rows:
+            row = item.row()
+            if row not in rows:
+                rows.add(row)
+                code_id = int(self.marking_codes_table.item(row, 0).text())
+                code = self.marking_codes_table.item(row, 1).text()
+                code_ids.append(code_id)
+                codes.append(code)
+        
+        # Если выбраны коды, открываем диалог сохранения
+        if codes:
+            from views.dialogs import DisplayCodesDialog
+            
+            # Используем первый выбранный код для определения GTIN и order_id
+            gtin = self.marking_codes_table.item(list(rows)[0], 2).text()
+            order_id = self.marking_codes_table.item(list(rows)[0], 3).text()
+            
+            # Открываем диалог отображения кодов
+            dialog = DisplayCodesDialog(self, order_id, gtin, codes)
+            result = dialog.exec()
+            
+            # Если диалог был принят, отправляем сигнал для отметки кодов как экспортированных
+            if result:
+                self.mark_codes_as_exported_signal.emit(code_ids)
+    
+    def on_mark_codes_as_used(self):
+        """Обработчик нажатия кнопки отметки кодов как использованных"""
+        # Получаем выбранные строки
+        selected_rows = self.marking_codes_table.selectedItems()
+        if not selected_rows:
+            QMessageBox.warning(self, "Ошибка", "Не выбраны коды для отметки")
+            return
+        
+        # Создаем список выбранных ID
+        code_ids = []
+        rows = set()
+        
+        for item in selected_rows:
+            row = item.row()
+            if row not in rows:
+                rows.add(row)
+                code_id = int(self.marking_codes_table.item(row, 0).text())
+                code_ids.append(code_id)
+        
+        # Запрашиваем подтверждение
+        reply = QMessageBox.question(
+            self, "Подтверждение", 
+            f"Вы уверены, что хотите отметить {len(code_ids)} кодов как использованные?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            # Отправляем сигнал для отметки кодов как использованных
+            self.mark_codes_as_used_signal.emit(code_ids)
+    
+    def update_marking_codes_table(self, codes):
+        """Обновление таблицы кодов маркировки
+        
+        Args:
+            codes (List[Dict]): Список словарей с данными кодов маркировки
+        """
+        # Очищаем таблицу
+        self.marking_codes_table.setRowCount(0)
+        
+        # Заполняем таблицу данными
+        for i, code_data in enumerate(codes):
+            self.marking_codes_table.insertRow(i)
+            
+            # ID
+            self.marking_codes_table.setItem(i, 0, QTableWidgetItem(str(code_data["id"])))
+            
+            # Код маркировки
+            code_item = QTableWidgetItem(code_data["code"])
+            # Если код использован, делаем его серым
+            if code_data["used"]:
+                code_item.setForeground(QColor(150, 150, 150))
+            self.marking_codes_table.setItem(i, 1, code_item)
+            
+            # GTIN
+            self.marking_codes_table.setItem(i, 2, QTableWidgetItem(code_data["gtin"]))
+            
+            # ID заказа
+            self.marking_codes_table.setItem(i, 3, QTableWidgetItem(code_data["order_id"]))
+            
+            # Использован
+            used_item = QTableWidgetItem("Да" if code_data["used"] else "Нет")
+            if code_data["used"]:
+                used_item.setForeground(QColor(150, 150, 150))
+            self.marking_codes_table.setItem(i, 4, used_item)
+            
+            # Экспортирован
+            exported_item = QTableWidgetItem("Да" if code_data["exported"] else "Нет")
+            if code_data["exported"]:
+                exported_item.setForeground(QColor(150, 150, 150))
+            self.marking_codes_table.setItem(i, 5, exported_item)
+            
+            # Создан
+            self.marking_codes_table.setItem(i, 6, QTableWidgetItem(code_data["created_at"]))
+        
+        # Подгоняем размеры колонок
+        self.marking_codes_table.resizeColumnsToContents()
+        
+        # Обновляем счетчик
+        if codes:
+            self.tabs.setTabText(self.tabs.indexOf(self.marking_codes_tab), f"Коды маркировки ({len(codes)})")
+        else:
+            self.tabs.setTabText(self.tabs.indexOf(self.marking_codes_tab), "Коды маркировки")
 
 class CatalogsDialog(QDialog):
     """Диалог для работы со справочниками"""
