@@ -701,8 +701,21 @@ class APIClient:
             
             status_code = response.status_code
             
-            # Проверяем наличие ошибок в ответе
-            if status_code >= 400 or not response_data.get("success", False):
+            # Проверяем ответ на успешность
+            # Считаем ответ успешным, если код ответа 2xx и есть поле 'codes' в ответе,
+            # или если явно указано поле 'success' = True
+            if (200 <= status_code < 300 and "codes" in response_data) or response_data.get("success", False):
+                # Добавляем флаг success если его нет в ответе
+                if "success" not in response_data:
+                    response_data["success"] = True
+                
+                # Проверяем наличие кодов в ответе
+                if "codes" in response_data and len(response_data["codes"]) > 0:
+                    logger.info(f"Успешно получены коды маркировки ({len(response_data['codes'])})")
+                else:
+                    logger.warning("Успешный ответ, но коды отсутствуют")
+            else:
+                # Формируем сообщение об ошибке для логирования
                 error_message = "Ошибка при получении КМ из заказа: "
                 if "globalErrors" in response_data:
                     error_message += ", ".join(response_data["globalErrors"])
@@ -715,6 +728,7 @@ class APIClient:
                     error_message += f"Код ответа {status_code}"
                 
                 logger.warning(error_message)
+                response_data["success"] = False
             
             # Добавим обновление словаря описаний методов API
             method_key = f"GET:/api/v2/{self.extension}/codes"

@@ -1098,6 +1098,9 @@ class MainController(QObject):
                 quantity=quantity
             )
             
+            # Логируем полный ответ для отладки
+            logger.debug(f"Полный ответ от API: {response}")
+            
             # Проверяем успешность выполнения запроса
             if response.get("success", False):
                 # Получаем коды маркировки из ответа
@@ -1109,8 +1112,16 @@ class MainController(QObject):
                 
                 # Если есть коды, отображаем их в представлении и сохраняем в БД
                 if codes_count > 0:
+                    # Очищаем коды от возможных невалидных символов для БД
+                    # Конвертируем контрольные символы в текстовое представление
+                    processed_codes = []
+                    for code in codes:
+                        # Заменяем Group Separator (GS, ASCII 29, \u001d) на текстовое представление [GS]
+                        processed_code = code.replace('\u001d', '[GS]')
+                        processed_codes.append(processed_code)
+                    
                     # Сохраняем коды в базу данных
-                    save_result = self.db.save_marking_codes(codes, gtin, order_id)
+                    save_result = self.db.save_marking_codes(processed_codes, gtin, order_id)
                     
                     if save_result:
                         message += " и сохранено в базу данных"
@@ -1119,7 +1130,7 @@ class MainController(QObject):
                         message += ", но не удалось сохранить их в базу данных"
                         logger.warning(f"Не удалось сохранить коды в базу данных для заказа {order_id}")
                     
-                    # Отображаем коды в интерфейсе
+                    # Отображаем коды в интерфейсе - для отображения используем исходные коды
                     self.view.display_codes_from_order(order_id, gtin, codes)
                     logger.info(message)
                     self.view.show_message("Успех", message)
@@ -1154,9 +1165,11 @@ class MainController(QObject):
             
         except Exception as e:
             # Обработка прочих ошибок
+            import traceback
             error_message = f"Неизвестная ошибка при получении КМ из заказа: {str(e)}"
             logger.error(error_message)
-            self.view.show_message("Ошибка", error_message)
+            logger.error(traceback.format_exc())
+            self.view.show_message("Ошибка", f"{error_message}\nПроверьте лог приложения для подробностей.")
     
     def save_all_data(self):
         """Сохранение всех данных перед завершением приложения"""
