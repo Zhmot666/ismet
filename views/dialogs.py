@@ -86,7 +86,13 @@ class CredentialsDialog(BaseDialog):
         omsid_label = QLabel("OMSID:")
         self.omsid_input = QLineEdit()
         if self.credentials:
-            self.omsid_input.setText(self.credentials.omsid)
+            # Проверяем, является ли credentials словарем
+            if isinstance(self.credentials, dict):
+                # Если это словарь, используем метод get для безопасного доступа к ключам
+                self.omsid_input.setText(self.credentials.get('omsid', ''))
+            else:
+                # Если это объект, то используем атрибуты
+                self.omsid_input.setText(self.credentials.omsid)
         omsid_layout.addWidget(omsid_label)
         omsid_layout.addWidget(self.omsid_input)
         layout.addLayout(omsid_layout)
@@ -96,10 +102,32 @@ class CredentialsDialog(BaseDialog):
         token_label = QLabel("Token:")
         self.token_input = QLineEdit()
         if self.credentials:
-            self.token_input.setText(self.credentials.token)
+            # Проверяем, является ли credentials словарем
+            if isinstance(self.credentials, dict):
+                # Если это словарь, используем метод get для безопасного доступа к ключам
+                self.token_input.setText(self.credentials.get('token', ''))
+            else:
+                # Если это объект, то используем атрибуты
+                self.token_input.setText(self.credentials.token)
         token_layout.addWidget(token_label)
         token_layout.addWidget(self.token_input)
         layout.addLayout(token_layout)
+        
+        # Поле для GLN
+        gln_layout = QHBoxLayout()
+        gln_label = QLabel("GLN (factoryId):")
+        self.gln_input = QLineEdit()
+        if self.credentials:
+            # Проверяем, является ли credentials словарем
+            if isinstance(self.credentials, dict):
+                # Если это словарь, используем метод get для безопасного доступа к ключам
+                self.gln_input.setText(self.credentials.get('gln', ''))
+            else:
+                # Если это объект, то используем атрибуты
+                self.gln_input.setText(self.credentials.gln)
+        gln_layout.addWidget(gln_label)
+        gln_layout.addWidget(self.gln_input)
+        layout.addLayout(gln_layout)
         
         # Кнопки
         buttons_layout = QHBoxLayout()
@@ -117,7 +145,8 @@ class CredentialsDialog(BaseDialog):
         """Получить данные из формы"""
         return {
             'omsid': self.omsid_input.text(),
-            'token': self.token_input.text()
+            'token': self.token_input.text(),
+            'gln': self.gln_input.text()
         }
 
 class NomenclatureDialog(BaseDialog):

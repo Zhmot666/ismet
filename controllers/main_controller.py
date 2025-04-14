@@ -1,9 +1,17 @@
 from PyQt6.QtCore import QObject, pyqtSignal
 import logging
 import requests
-from models.models import Order, Connection, Credentials, Nomenclature, Extension
+from models.models import Order, Connection, Credentials, Nomenclature, Extension, EmissionType, Country, OrderStatus, APIOrder
 import datetime
 import os
+import time
+import json
+from typing import List, Dict, Union, Optional, Any, Callable
+from PyQt6.QtCore import Qt
+
+from models.database import Database
+from models.api_client import APIClient
+from models.api_log import APILog
 
 logger = logging.getLogger(__name__)
 
@@ -16,11 +24,15 @@ class MainController(QObject):
         self.api_client = api_client
         self.api_logger = api_logger
         
+        # Устанавливаем ссылку на базу данных в объект view
+        self.view.db = self.db
+        
         # Подключение сигналов и слотов
         self.connect_signals()
         
         # Загрузка данных при запуске
         self.load_orders()
+        self.load_api_orders_from_db()  # Загружаем API заказы из базы данных
         self.load_connections()
         self.load_credentials()
         self.load_nomenclature()
@@ -72,6 +84,8 @@ class MainController(QObject):
         self.view.get_orders_status_signal.connect(self.get_orders_status)
         self.view.create_emission_order_signal.connect(self.create_emission_order)
         self.view.get_order_details_signal.connect(self.get_order_details)
+        self.view.api_orders_signal.connect(self.get_api_orders)
+        self.view.delete_api_order_signal.connect(self.delete_api_order)
         
         # Сигналы вкладки подключений
         self.view.add_connection_signal.connect(self.add_connection)
@@ -99,14 +113,22 @@ class MainController(QObject):
         
         # Сигналы вкладки стран
         self.view.load_countries_signal.connect(self.load_countries)
+        
+        # Сигналы для работы со статусами заказов
+        self.view.load_order_statuses_signal.connect(self.load_order_statuses)
+        self.view.add_order_status_signal.connect(self.add_order_status)
+        self.view.edit_order_status_signal.connect(self.edit_order_status)
+        self.view.delete_order_status_signal.connect(self.delete_order_status)
     
     def load_all_data(self):
         """Загрузка всех данных из базы данных"""
-        self.load_orders()
         self.load_connections()
         self.load_credentials()
         self.load_nomenclature()
         self.load_extensions()
+        self.load_orders()
+        self.load_countries()
+        self.load_order_statuses()
         self.load_api_logs()
     
     def load_orders(self):
@@ -530,10 +552,10 @@ class MainController(QObject):
             logger.error(f"Ошибка при добавлении учетных данных: {str(e)}")
             self.view.show_message("Ошибка", f"Ошибка при добавлении учетных данных: {str(e)}")
     
-    def edit_credentials(self, credentials_id, omsid, token):
+    def edit_credentials(self, credentials_id, omsid, token, gln):
         """Редактирование учетных данных"""
         try:
-            credentials = self.db.update_credentials(credentials_id, omsid, token)
+            credentials = self.db.update_credentials(credentials_id, omsid, token, gln)
             logger.info(f"Учетные данные {credentials_id} обновлены")
             self.load_credentials()
             self.view.show_message("Успех", "Учетные данные успешно обновлены")
@@ -634,6 +656,7 @@ class MainController(QObject):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         expected_complete_ms = 0
         expected_complete_min = 0
+        expected_complete_str = ""
         status = "Непринят"  # По умолчанию статус "Непринят"
         response = None
         
@@ -673,31 +696,45 @@ class MainController(QObject):
                 # Преобразуем миллисекунды в дату и время
                 expected_complete = None
                 if expected_complete_ms:
-                    # Переводим миллисекунды в секунды и создаем объект даты/времени
-                    expected_complete = datetime.datetime.fromtimestamp(expected_complete_ms / 1000)
+                    # Конвертируем миллисекунды в дату/время, проверяя размер значения
+                    # Если значение слишком маленькое (меньше 13 знаков), это секунды
+                    timestamp_value = expected_complete_ms
+                    # Проверяем, если значение маленькое (менее 10000000000), это может быть в секундах или минутах
+                    if timestamp_value < 10000000000:
+                        # Предполагаем, что это минуты, конвертируем в миллисекунды
+                        timestamp_value = timestamp_value * 60 * 1000
+                    
+                    # Теперь преобразуем в дату
+                    expected_complete = datetime.fromtimestamp(timestamp_value / 1000)
                     expected_complete_str = expected_complete.strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    # Добавим сообщение в лог для отладки
+                    logger.info(f"Преобразование времени ожидания: {expected_complete_ms} мс -> {expected_complete_str}")
                 else:
                     expected_complete_str = ""
                 
                 # Определяем статус заказа
-                # Статус "Принят", если omsId из ответа совпадает с omsId из запроса
-                # иначе статус "Непринят"
-                status = "Принят" if response.get("omsId") == self.api_client.omsid else "Непринят"
-            
-            # Обрабатываем ответ
-            if response and response.get("success", False):
-                logger.info(f"Заказ на эмиссию успешно создан. Идентификатор заказа: {order_id}")
-                self.view.show_message("Успех", f"Заказ на эмиссию успешно создан. ID заказа: {order_id}")
-            else:
-                error_message = "Ошибка при создании заказа"
-                if response:
+                # Проверяем несколько полей для определения успешности
+                if response.get("success", False) or response.get("orderId") or response.get("orderInfos"):
+                    status = "Принят" 
+                    logger.info(f"Заказ на эмиссию успешно создан. Идентификатор заказа: {order_id}")
+                    self.view.show_message("Успех", f"Заказ на эмиссию успешно создан. ID заказа: {order_id}")
+                else:
+                    status = "Непринят"
+                    error_message = "Ошибка при создании заказа"
                     if "globalErrors" in response:
                         error_message += ": " + ", ".join(response["globalErrors"])
                     elif "error" in response:
                         error_message += ": " + str(response["error"])
                 
-                logger.warning(error_message)
-                self.view.show_message("Предупреждение", error_message)
+                    logger.warning(error_message)
+                    self.view.show_message("Предупреждение", error_message)
+            
+            # Убираем дублирующийся код проверки success
+            else:
+                # Если response пустой, сохраняем информацию об ошибке
+                logger.warning("Пустой ответ от сервера при создании заказа")
+                self.view.show_message("Предупреждение", "Ошибка при создании заказа: пустой ответ от сервера")
         
         except ValueError as e:
             logger.error(f"Ошибка валидации данных заказа: {str(e)}")
@@ -781,4 +818,236 @@ class MainController(QObject):
         except Exception as e:
             logger.error(f"Ошибка при загрузке деталей заказа: {str(e)}")
             self.view.show_message("Ошибка", 
-                f"Ошибка при загрузке деталей заказа: {str(e)}") 
+                f"Ошибка при загрузке деталей заказа: {str(e)}")
+
+    def get_api_orders(self):
+        """Получение заказов из API в новом формате для вкладки API заказы
+        
+        Внимание: Этот метод должен вызываться только по прямому запросу пользователя (кнопка "Обновить заказы"),
+        так как на сервере есть ограничение по количеству вызовов API.
+        """
+        try:
+            # Обновляем настройки API-клиента перед отправкой запроса
+            self.update_api_client_settings()
+            
+            # Проверяем наличие активного подключения
+            if not self.api_client.base_url:
+                logger.warning("Нет активного подключения")
+                self.view.show_message("Предупреждение", 
+                    "Нет активного подключения. Настройте подключение перед запросом заказов.")
+                return
+            
+            # Проверяем наличие omsId
+            if not self.api_client.omsid:
+                logger.warning("Не указан OMSID")
+                self.view.show_message("Предупреждение", 
+                    "Не указан OMSID. Добавьте учетные данные перед запросом заказов.")
+                return
+            
+            # Получаем статус заказов через API
+            response = self.api_client.get_orders_status()
+            
+            # Проверяем, есть ли информация о заказах в ответе
+            if "orderInfos" in response and response["orderInfos"]:
+                order_infos = response["orderInfos"]
+                
+                # Создаем объекты APIOrder для сохранения в базу данных
+                api_orders = []
+                
+                for order_info in order_infos:
+                    api_order = APIOrder(
+                        order_id=order_info.get("orderId", ""),
+                        order_status=order_info.get("orderStatus", ""),
+                        created_timestamp=order_info.get("createdTimestamp", ""),
+                        total_quantity=order_info.get("totalQuantity", 0),
+                        num_of_products=order_info.get("numOfProducts", 0),
+                        product_group_type=order_info.get("productGroupType", ""),
+                        signed=order_info.get("signed", False),
+                        verified=order_info.get("verified", False),
+                        buffers=order_info.get("buffers", [])
+                    )
+                    api_orders.append(api_order)
+                
+                # Сохраняем API заказы в базу данных
+                self.db.save_api_orders(api_orders)
+                
+                # Обновляем таблицу API заказов
+                self.view.update_api_orders_table(order_infos)
+                logger.info(f"Загружено и сохранено {len(order_infos)} API заказов")
+                self.view.show_message("Успех", f"Загружено и сохранено {len(order_infos)} API заказов")
+            else:
+                # Если нет данных, очищаем таблицу
+                self.view.update_api_orders_table([])
+                self.view.show_message("Информация", "Заказы не найдены в API")
+            
+            # Обновляем таблицу логов API
+            self.load_api_logs()
+        
+        except Exception as e:
+            logger.error(f"Ошибка при получении API заказов: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при получении API заказов: {str(e)}")
+            self.load_api_logs()
+
+    # Методы для работы со статусами заказов
+    def load_order_statuses(self):
+        """Загрузка статусов заказов из базы данных"""
+        try:
+            # Загружаем статусы заказов из базы данных
+            statuses = self.db.get_order_statuses()
+            logger.info(f"Загружено {len(statuses)} статусов заказов")
+            
+            # Обновляем таблицу статусов заказов в представлении
+            self.view.update_order_statuses_table(statuses)
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке статусов заказов: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при загрузке статусов заказов: {str(e)}")
+    
+    def add_order_status(self, code, name, description=""):
+        """Добавление статуса заказа в базу данных"""
+        try:
+            # Проверяем, что код и название не пустые
+            if not code or not name:
+                self.view.show_message("Ошибка", "Код и название статуса не могут быть пустыми")
+                return
+            
+            # Добавляем статус заказа в базу данных
+            status = self.db.add_order_status(code, name, description)
+            logger.info(f"Добавлен статус заказа: {code} - {name}")
+            
+            # Явно сохраняем изменения в базу данных
+            self.db.commit()
+            
+            # Обновляем таблицу статусов заказов в представлении
+            self.load_order_statuses()
+            
+            # Показываем сообщение об успешном добавлении
+            self.view.show_message("Успех", f"Статус заказа '{name}' успешно добавлен")
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении статуса заказа: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при добавлении статуса заказа: {str(e)}")
+    
+    def edit_order_status(self, status_id, code, name, description=""):
+        """Редактирование статуса заказа в базе данных"""
+        try:
+            # Проверяем, что код и название не пустые
+            if not code or not name:
+                self.view.show_message("Ошибка", "Код и название статуса не могут быть пустыми")
+                return
+            
+            # Обновляем статус заказа в базе данных
+            status = self.db.update_order_status(status_id, code, name, description)
+            logger.info(f"Обновлен статус заказа: {code} - {name}")
+            
+            # Явно сохраняем изменения в базу данных
+            self.db.commit()
+            
+            # Обновляем таблицу статусов заказов в представлении
+            self.load_order_statuses()
+            
+            # Показываем сообщение об успешном обновлении
+            self.view.show_message("Успех", f"Статус заказа '{name}' успешно обновлен")
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении статуса заказа: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при обновлении статуса заказа: {str(e)}")
+    
+    def delete_order_status(self, status_id):
+        """Удаление статуса заказа из базы данных"""
+        try:
+            # Удаляем статус заказа из базы данных
+            self.db.delete_order_status(status_id)
+            logger.info(f"Удален статус заказа с ID: {status_id}")
+            
+            # Явно сохраняем изменения в базу данных
+            self.db.commit()
+            
+            # Обновляем таблицу статусов заказов в представлении
+            self.load_order_statuses()
+            
+            # Показываем сообщение об успешном удалении
+            self.view.show_message("Успех", "Статус заказа успешно удален")
+        except Exception as e:
+            logger.error(f"Ошибка при удалении статуса заказа: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при удалении статуса заказа: {str(e)}")
+
+    def load_api_orders_from_db(self):
+        """Загрузка сохраненных API заказов из базы данных
+        
+        Этот метод загружает сохраненные ранее API заказы из локальной базы данных
+        без выполнения API запросов к серверу.
+        """
+        try:
+            # Получаем сохраненные API заказы из базы данных
+            api_orders = self.db.get_api_orders()
+            
+            if api_orders:
+                # Преобразуем объекты APIOrder в словари для отображения в таблице
+                order_infos = []
+                for api_order in api_orders:
+                    order_info = {
+                        "orderId": api_order.order_id,
+                        "orderStatus": api_order.order_status,
+                        "createdTimestamp": api_order.created_timestamp,
+                        "totalQuantity": api_order.total_quantity,
+                        "numOfProducts": api_order.num_of_products,
+                        "productGroupType": api_order.product_group_type,
+                        "signed": api_order.signed,
+                        "verified": api_order.verified,
+                        "buffers": api_order.buffers
+                    }
+                    order_infos.append(order_info)
+                
+                # Обновляем таблицу API заказов
+                self.view.update_api_orders_table(order_infos)
+                logger.info(f"Загружено {len(order_infos)} API заказов из базы данных")
+                
+                # Отображаем информацию в строке состояния
+                self.view.set_api_orders_status(f"Загружено {len(order_infos)} заказов из базы данных. Для обновления с сервера нажмите 'Обновить заказы'")
+            else:
+                # Если нет данных, очищаем таблицу
+                self.view.update_api_orders_table([])
+                logger.info("API заказы не найдены в базе данных")
+                
+                # Отображаем информацию в строке состояния
+                self.view.set_api_orders_status("API заказы не найдены в базе данных. Для загрузки с сервера нажмите 'Обновить заказы'")
+        
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке API заказов из базы данных: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при загрузке API заказов из базы данных: {str(e)}")
+    
+    def delete_api_order(self, order_id):
+        """Удаление API заказа из базы данных"""
+        try:
+            # Удаляем API заказ из базы данных
+            success = self.db.delete_api_order(order_id)
+            
+            if success:
+                logger.info(f"API заказ с ID {order_id} удален из базы данных")
+                self.view.show_message("Успех", f"API заказ с ID {order_id} удален из базы данных")
+                
+                # Обновляем данные в таблице
+                self.load_api_orders_from_db()
+            else:
+                logger.warning(f"API заказ с ID {order_id} не найден в базе данных")
+                self.view.show_message("Предупреждение", f"API заказ с ID {order_id} не найден в базе данных")
+        
+        except Exception as e:
+            logger.error(f"Ошибка при удалении API заказа: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при удалении API заказа: {str(e)}")
+    
+    def save_all_data(self):
+        """Метод для явного сохранения всех данных перед выходом из приложения"""
+        try:
+            logger.info("Сохранение всех данных перед выходом...")
+            
+            # Сохраняем состояние базы данных
+            if self.db:
+                self.db.commit()
+            
+            # Можно добавить дополнительные действия по сохранению данных
+            # Например, сохранение настроек, состояния интерфейса и т.д.
+            
+            logger.info("Все данные успешно сохранены")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении данных: {str(e)}")
+            # Не показываем сообщение пользователю, так как это происходит при закрытии 

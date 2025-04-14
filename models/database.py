@@ -1,16 +1,72 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
-from datetime import datetime
 import sqlite3
+from datetime import datetime
+from typing import List, Dict, Any, Optional, Union, Tuple
+import time
 import logging
-from typing import List, Optional, Dict, Any
-from models.models import Order, Connection, Credentials, Nomenclature, Extension, EmissionType, Country
+import json
+
+from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey, DateTime, Boolean
+from sqlalchemy.orm import declarative_base, Session, relationship
+from sqlalchemy.ext.declarative import declarative_base
+
+from models.models import Order, Connection, Credentials, Nomenclature, Extension, EmissionType, Country, OrderStatus, APIOrder
+import os
+import time
 
 # Инициализация логгера
 logger = logging.getLogger(__name__)
 
 Base = declarative_base()
+
+class UserORM:
+    """ORM класс для работы с пользователями"""
+    table_name = "users"
+    create_table_query = """
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE,
+        password TEXT NOT NULL,
+        role TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """
+
+
+class APIOrderORM:
+    """ORM класс для работы с API заказами"""
+    table_name = "api_orders"
+    create_table_query = """
+    CREATE TABLE IF NOT EXISTS api_orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id TEXT NOT NULL UNIQUE,
+        order_status TEXT NOT NULL,
+        created_timestamp TEXT NOT NULL,
+        total_quantity INTEGER NOT NULL,
+        num_of_products INTEGER NOT NULL,
+        product_group_type TEXT NOT NULL,
+        signed BOOLEAN NOT NULL,
+        verified BOOLEAN NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """
+
+
+class APIOrderBufferORM:
+    """ORM класс для работы с буферами API заказов"""
+    table_name = "api_order_buffers"
+    create_table_query = """
+    CREATE TABLE IF NOT EXISTS api_order_buffers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        api_order_id INTEGER NOT NULL,
+        buffer_id TEXT NOT NULL,
+        gtin TEXT NOT NULL,
+        quantity INTEGER NOT NULL,
+        capacity INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (api_order_id) REFERENCES api_orders (id) ON DELETE CASCADE
+    )
+    """
+
 
 class OrderORM(Base):
     """Модель заказа в SQLAlchemy"""
@@ -107,17 +163,41 @@ class CountryORM(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+class OrderStatusORM(Base):
+    """Модель статуса заказа в SQLAlchemy"""
+    __tablename__ = 'order_statuses'
+    
+    id = Column(Integer, primary_key=True)
+    code = Column(String, nullable=False, unique=True)
+    name = Column(String, nullable=False)
+    description = Column(String)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
 class Database:
     """Класс для работы с базой данных"""
     def __init__(self, db_path: str = "database.db"):
+        """Инициализация подключения к базе данных"""
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
+        
+        # Создание таблиц, если они не существуют
+        cursor = self.conn.cursor()
+        
+        # Создание таблицы для пользователей
+        cursor.execute(UserORM.create_table_query)
+        
+        # Создание таблицы для API заказов
+        cursor.execute(APIOrderORM.create_table_query)
+        cursor.execute(APIOrderBufferORM.create_table_query)
+        
         self.create_tables()
         self.migrate_database()
         self.insert_default_extensions()
         self.insert_default_emission_types()
         self.insert_default_countries()
+        self.insert_default_order_statuses()
     
     def create_tables(self):
         """Создание таблиц в базе данных"""
@@ -204,6 +284,16 @@ class Database:
                 name TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Таблица статусов заказов
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS order_statuses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                description TEXT
             )
         ''')
         
@@ -329,6 +419,19 @@ class Database:
                 logger.info("Миграция данных expected_complete завершена")
             except Exception as e:
                 logger.error(f"Ошибка при миграции данных expected_complete: {str(e)}")
+        
+        # Проверяем существование таблицы статусов заказов
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='order_statuses'")
+        if not cursor.fetchone():
+            # Если таблицы нет, создаем её
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS order_statuses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    description TEXT
+                )
+            ''')
     
     def insert_default_extensions(self):
         """Вставка значений расширений по умолчанию, если таблица пуста"""
@@ -649,6 +752,42 @@ class Database:
             
             self.conn.commit()
             logger.info("Значения стран мира по умолчанию добавлены")
+    
+    def insert_default_order_statuses(self):
+        """Добавление стандартных статусов заказов"""
+        cursor = self.conn.cursor()
+        
+        # Стандартные статусы заказов
+        default_statuses = [
+            ("CREATED", "Заказ создан", "Заказ создан в системе"),
+            ("PENDING", "Заказ ожидает подтверждения", "Заказ ожидает подтверждения в системе маркировки"),
+            ("DECLINED", "Заказ не подтверждён", "Заказ не подтверждён в системе маркировки"),
+            ("APPROVED", "Заказ подтверждён", "Заказ подтверждён в системе маркировки"),
+            ("READY", "Заказ готов", "Заказ готов к использованию"),
+            ("CLOSED", "Заказ закрыт", "Заказ закрыт (обработан)")
+        ]
+        
+        # Проверяем, какие коды статусов уже существуют в базе
+        cursor.execute("SELECT code FROM order_statuses")
+        existing_codes = [row[0] for row in cursor.fetchall()]
+        
+        # Добавляем только отсутствующие статусы
+        added_count = 0
+        for code, name, description in default_statuses:
+            if code not in existing_codes:
+                cursor.execute(
+                    "INSERT INTO order_statuses (code, name, description) VALUES (?, ?, ?)",
+                    (code, name, description)
+                )
+                added_count += 1
+                logger.info(f"Добавлен стандартный статус заказа: {code} - {name}")
+        
+        if added_count > 0:
+            # Явно сохраняем изменения
+            self.conn.commit()
+            logger.info(f"Добавлено {added_count} стандартных статусов заказов")
+        
+        return added_count > 0
     
     # Методы для работы с заказами
     def add_order(self, order_number: str, timestamp: str = None, expected_complete: int = None, status: str = "Не определен") -> Order:
@@ -1256,7 +1395,225 @@ class Database:
             return Country(row["id"], row["code"], row["name"])
         return None
     
+    def get_order_statuses(self) -> List[OrderStatus]:
+        """Получение списка статусов заказов"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM order_statuses")
+        rows = cursor.fetchall()
+        
+        result = []
+        for row in rows:
+            status = OrderStatus(
+                row["id"],
+                row["code"],
+                row["name"],
+                row["description"] if "description" in row.keys() else ""
+            )
+            result.append(status)
+        
+        return result
+    
+    def get_order_status_by_code(self, code: str) -> Optional[OrderStatus]:
+        """Получение статуса заказа по коду"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM order_statuses WHERE code = ?", (code,))
+        row = cursor.fetchone()
+        
+        if row:
+            return OrderStatus(
+                row["id"],
+                row["code"],
+                row["name"],
+                row["description"] if "description" in row.keys() else ""
+            )
+        
+        return None
+    
+    def add_order_status(self, code: str, name: str, description: str = "") -> OrderStatus:
+        """Добавление статуса заказа в базу данных"""
+        try:
+            # Проверяем, что код и название не пустые
+            if not code or not name:
+                raise ValueError("Код и название статуса не могут быть пустыми")
+            
+            # Проверяем, что код уникальный
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT id FROM order_statuses WHERE code = ?", (code,))
+            if cursor.fetchone():
+                raise ValueError(f"Статус с кодом '{code}' уже существует")
+            
+            # Добавляем статус заказа
+            cursor.execute("""
+                INSERT INTO order_statuses (code, name, description)
+                VALUES (?, ?, ?)
+            """, (code, name, description))
+            
+            # Получаем ID добавленного статуса
+            status_id = cursor.lastrowid
+            
+            # Явно сохраняем изменения
+            self.conn.commit()
+            
+            # Создаем и возвращаем объект статуса
+            return OrderStatus(
+                id=status_id,
+                code=code,
+                name=name,
+                description=description
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении статуса заказа: {str(e)}")
+            raise
+    
+    def update_order_status(self, status_id: int, code: str, name: str, description: str = "") -> OrderStatus:
+        """Обновление статуса заказа в базе данных"""
+        try:
+            # Проверяем, что код и название не пустые
+            if not code or not name:
+                raise ValueError("Код и название статуса не могут быть пустыми")
+            
+            # Проверяем, что код уникальный (исключая текущий статус)
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT id FROM order_statuses 
+                WHERE code = ? AND id != ?
+            """, (code, status_id))
+            if cursor.fetchone():
+                raise ValueError(f"Статус с кодом '{code}' уже существует")
+            
+            # Обновляем статус заказа
+            cursor.execute("""
+                UPDATE order_statuses 
+                SET code = ?, name = ?, description = ?
+                WHERE id = ?
+            """, (code, name, description, status_id))
+            
+            # Явно сохраняем изменения
+            self.conn.commit()
+            
+            # Создаем и возвращаем объект статуса
+            return OrderStatus(
+                id=status_id,
+                code=code,
+                name=name,
+                description=description
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении статуса заказа: {str(e)}")
+            raise
+    
+    def delete_order_status(self, status_id: int) -> None:
+        """Удаление статуса заказа из базы данных"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("DELETE FROM order_statuses WHERE id = ?", (status_id,))
+            
+            # Явно сохраняем изменения
+            self.conn.commit()
+            
+        except Exception as e:
+            logger.error(f"Ошибка при удалении статуса заказа: {str(e)}")
+            raise
+    
+    # Методы для работы с API заказами
+    def save_api_orders(self, api_orders: List[APIOrder]) -> List[APIOrder]:
+        """Сохранение API заказов в базу данных"""
+        try:
+            cursor = self.conn.cursor()
+            
+            # Очищаем таблицу перед сохранением новых данных
+            cursor.execute("DELETE FROM api_orders")
+            
+            # Сохраняем каждый заказ
+            for order in api_orders:
+                cursor.execute("""
+                    INSERT INTO api_orders (
+                        order_id, order_status, created_timestamp,
+                        total_quantity, num_of_products, product_group_type,
+                        signed, verified, buffers
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    order.order_id, order.order_status, order.created_timestamp,
+                    order.total_quantity, order.num_of_products, order.product_group_type,
+                    order.signed, order.verified, json.dumps(order.buffers)
+                ))
+            
+            # Явно сохраняем изменения
+            self.conn.commit()
+            
+            return api_orders
+            
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении API заказов: {str(e)}")
+            raise
+    
+    def get_api_orders(self) -> List[APIOrder]:
+        """Получение списка API заказов из базы данных"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM api_orders ORDER BY created_timestamp DESC")
+        rows = cursor.fetchall()
+        
+        api_orders = []
+        for row in rows:
+            # Создаем объект API заказа
+            api_order = APIOrder(
+                order_id=row["order_id"],
+                order_status=row["order_status"],
+                created_timestamp=row["created_timestamp"],
+                total_quantity=row["total_quantity"],
+                num_of_products=row["num_of_products"],
+                product_group_type=row["product_group_type"],
+                signed=row["signed"],
+                verified=row["verified"]
+            )
+            api_order.id = row["id"]
+            
+            # Получаем буферы для этого заказа
+            cursor.execute(
+                "SELECT * FROM api_order_buffers WHERE api_order_id = ?",
+                (api_order.id,)
+            )
+            buffer_rows = cursor.fetchall()
+            
+            buffers = []
+            for buffer_row in buffer_rows:
+                buffers.append({
+                    "bufferId": buffer_row["buffer_id"],
+                    "gtin": buffer_row["gtin"],
+                    "quantity": buffer_row["quantity"],
+                    "capacity": buffer_row["capacity"]
+                })
+            
+            api_order.buffers = buffers
+            api_orders.append(api_order)
+        
+        return api_orders
+    
+    def delete_api_order(self, order_id: str) -> bool:
+        """Удаление API заказа из базы данных"""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM api_orders WHERE order_id = ?", (order_id,))
+        self.conn.commit()
+        return cursor.rowcount > 0
+    
     def __del__(self):
         """Закрытие соединения с базой данных при уничтожении объекта"""
         if hasattr(self, 'conn') and self.conn:
-            self.conn.close() 
+            try:
+                # Явное сохранение всех изменений перед закрытием
+                self.conn.commit()
+                logger.info("Изменения в базе данных сохранены перед закрытием")
+            except Exception as e:
+                logger.error(f"Ошибка при сохранении изменений в базе данных: {str(e)}")
+            finally:
+                # Закрытие соединения
+                self.conn.close()
+                logger.info("Соединение с базой данных закрыто")
+    
+    def commit(self):
+        """Явное сохранение изменений в базу данных"""
+        if hasattr(self, 'conn') and self.conn:
+            self.conn.commit()
+            logger.info("Изменения вручную сохранены в базу данных")
