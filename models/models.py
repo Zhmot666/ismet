@@ -54,10 +54,18 @@ class EmissionType:
 
 @dataclass
 class Country:
-    """Класс для представления страны"""
-    id: int
-    code: str
-    name: str
+    """Класс для представления информации о стране
+    
+    Attributes:
+        id (int): ID страны
+        code (str): Код страны
+        name (str): Название страны
+    """
+    
+    def __init__(self, id: int, code: str, name: str):
+        self.id = id
+        self.code = code
+        self.name = name
 
 class OrderStatus:
     """Модель статуса заказа"""
@@ -85,3 +93,34 @@ class APIOrder:
         self.buffers = buffers or []
         self.updated_at = updated_at
         self.id = None  # ID в локальной базе данных 
+
+class AggregationFile:
+    """Модель для представления файлов агрегации"""
+    def __init__(self, id: int, filename: str, product: str, marking_codes: List[str], level1_codes: List[str], 
+                 level2_codes: List[str], comment: str = "", json_content: str = "", created_at: datetime = None, data: Dict = None):
+        self.id = id
+        self.filename = filename
+        self.product = product
+        self.marking_codes = marking_codes
+        self.level1_codes = level1_codes
+        self.level2_codes = level2_codes
+        self.comment = comment
+        self.json_content = json_content
+        self.created_at = created_at 
+        self.data = data or {} 
+
+class UsageType:
+    """Класс для представления информации о типе использования кодов маркировки
+    
+    Attributes:
+        id (int): ID типа использования
+        code (str): Код типа использования
+        name (str): Название типа использования
+        description (str): Описание типа использования
+    """
+    
+    def __init__(self, id: int, code: str, name: str, description: str = None):
+        self.id = id
+        self.code = code
+        self.name = name
+        self.description = description 

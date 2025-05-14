@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey
 from sqlalchemy.orm import declarative_base, Session, relationship
 from sqlalchemy.ext.declarative import declarative_base
 
-from models.models import Order, Connection, Credentials, Nomenclature, Extension, EmissionType, Country, OrderStatus, APIOrder
+from models.models import Order, Connection, Credentials, Nomenclature, Extension, EmissionType, Country, OrderStatus, APIOrder, AggregationFile, UsageType
 import os
 import time
 
@@ -157,6 +157,21 @@ class OrderStatusORM(Base):
     code = Column(String, nullable=False, unique=True)
     name = Column(String, nullable=False)
     description = Column(String)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class AggregationFileORM(Base):
+    """Модель файла агрегации в SQLAlchemy"""
+    __tablename__ = 'aggregation_files'
+    
+    id = Column(Integer, primary_key=True)
+    filename = Column(String, nullable=False)
+    product = Column(String)  # Название продукции
+    marking_codes = Column(String)  # JSON-строка со списком кодов маркировки
+    level1_codes = Column(String)   # JSON-строка со списком кодов агрегации 1 уровня
+    level2_codes = Column(String)   # JSON-строка со списком кодов агрегации 2 уровня
+    comment = Column(String)
+    json_content = Column(String)   # Полное содержимое JSON-файла
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -323,6 +338,34 @@ class Database:
                 order_id TEXT NOT NULL,
                 used INTEGER DEFAULT 0,
                 exported INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Создаем таблицу файлов агрегации
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS aggregation_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT NOT NULL,
+                product TEXT,
+                comment TEXT,
+                json_content TEXT,
+                marking_codes TEXT,
+                level1_codes TEXT,
+                level2_codes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Создаем таблицу типов использования кодов маркировки
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS usage_types (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                description TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -1923,31 +1966,146 @@ class Database:
             return []
     
     def mark_codes_as_used(self, code_ids):
-        """Отметить коды как использованные
+        """Отметить коды маркировки как использованные
         
         Args:
-            code_ids (List[int]): Список ID кодов для отметки
+            code_ids (list): Список ID кодов маркировки
             
         Returns:
-            bool: True, если отметка прошла успешно
+            int: Количество обновленных записей
         """
         try:
+            if not code_ids:
+                return 0
+                
             cursor = self.conn.cursor()
-            
-            # Формируем список параметров для запроса IN
-            placeholders = ",".join(["?"] * len(code_ids))
-            
-            # Выполняем обновление
-            cursor.execute(
-                f"UPDATE marking_codes SET used = 1, updated_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})",
-                code_ids
-            )
-            
+            placeholders = ','.join(['?' for _ in code_ids])
+            query = f'''
+                UPDATE marking_codes 
+                SET used = 1, 
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id IN ({placeholders})
+            '''
+            cursor.execute(query, code_ids)
             self.conn.commit()
-            return True
+            return cursor.rowcount
         except Exception as e:
             logger.error(f"Ошибка при отметке кодов как использованных: {str(e)}")
-            return False
+            return 0
+    
+    def unmark_codes_as_used(self, code_ids):
+        """Снять отметку 'использованные' с кодов маркировки
+        
+        Args:
+            code_ids (list): Список ID кодов маркировки
+            
+        Returns:
+            int: Количество обновленных записей
+        """
+        try:
+            if not code_ids:
+                return 0
+                
+            cursor = self.conn.cursor()
+            placeholders = ','.join(['?' for _ in code_ids])
+            query = f'''
+                UPDATE marking_codes 
+                SET used = 0, 
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id IN ({placeholders})
+            '''
+            cursor.execute(query, code_ids)
+            self.conn.commit()
+            logger.info(f"Снята отметка 'использованные' с {cursor.rowcount} кодов маркировки")
+            return cursor.rowcount
+        except Exception as e:
+            logger.error(f"Ошибка при снятии отметки 'использованные' с кодов: {str(e)}")
+            return 0
+    
+    def get_marking_code_ids_by_barcodes(self, barcodes):
+        """Получение ID кодов маркировки по значениям штрих-кодов
+        
+        Args:
+            barcodes (List[str]): Список штрих-кодов
+            
+        Returns:
+            List[int]: Список ID кодов маркировки
+        """
+        try:
+            if not barcodes:
+                return []
+                
+            cursor = self.conn.cursor()
+            
+            # Логируем первые несколько штрих-кодов для диагностики
+            sample_barcodes = barcodes[:3]
+            logger.info(f"Примеры штрих-кодов для поиска: {sample_barcodes}")
+            
+            # Вместо прямого сравнения, используем оператор LIKE для каждого штрих-кода
+            # Это необходимо, потому что в базе коды могут храниться в разных форматах
+            code_ids = []
+            
+            # Для оптимизации запроса разобьем поиск на порции
+            batch_size = 100
+            for i in range(0, len(barcodes), batch_size):
+                batch = barcodes[i:i + batch_size]
+                
+                # Строим запрос с OR для каждого кода в порции
+                query_parts = []
+                params = []
+                
+                for barcode in batch:
+                    # Проверяем точное совпадение
+                    query_parts.append("code = ?")
+                    params.append(barcode)
+                    
+                    # Также ищем варианты с другими разделителями если есть [GS]
+                    if '[GS]' in barcode:
+                        # Вариант с \u001d
+                        variant = barcode.replace('[GS]', '\u001d')
+                        query_parts.append("code = ?")
+                        params.append(variant)
+                        
+                        # Вариант с ASCII-кодом GS (\x1d)
+                        variant = barcode.replace('[GS]', '\x1d')
+                        query_parts.append("code = ?")
+                        params.append(variant)
+                
+                # Формируем полный запрос
+                query = f"""
+                    SELECT id FROM marking_codes
+                    WHERE {" OR ".join(query_parts)}
+                """
+                
+                cursor.execute(query, params)
+                batch_result = [row['id'] for row in cursor.fetchall()]
+                code_ids.extend(batch_result)
+                
+                logger.info(f"Найдено {len(batch_result)} кодов в порции {i//batch_size + 1}")
+            
+            # Удаляем дубликаты
+            code_ids = list(set(code_ids))
+            
+            logger.info(f"Всего найдено {len(code_ids)} уникальных кодов маркировки по {len(barcodes)} штрих-кодам")
+            
+            # Если не найдено ни одного кода, логируем дополнительную информацию
+            if not code_ids and barcodes:
+                # Проверим, есть ли вообще коды в таблице
+                cursor.execute("SELECT COUNT(*) as count FROM marking_codes")
+                total_codes = cursor.fetchone()['count']
+                logger.info(f"Всего кодов в таблице: {total_codes}")
+                
+                # Проверим формат хранения кодов в базе
+                if total_codes > 0:
+                    cursor.execute("SELECT code FROM marking_codes LIMIT 5")
+                    sample_db_codes = [row['code'] for row in cursor.fetchall()]
+                    logger.info(f"Примеры кодов из базы: {sample_db_codes}")
+            
+            return code_ids
+        except Exception as e:
+            logger.error(f"Ошибка при получении ID кодов маркировки по штрих-кодам: {str(e)}")
+            logger.exception("Подробная информация об ошибке:")
+            return []
     
     def mark_codes_as_exported(self, code_ids):
         """Отметить коды как экспортированные
@@ -1974,4 +2132,690 @@ class Database:
             return True
         except Exception as e:
             logger.error(f"Ошибка при отметке кодов как экспортированных: {str(e)}")
+            return False
+    
+    # Методы для работы с файлами агрегации
+    def add_aggregation_file(self, filename: str, product: str, marking_codes: List[str], 
+                           level1_codes: List[str], level2_codes: List[str], 
+                           comment: str = "", json_content: str = "") -> AggregationFile:
+        """Добавление нового файла агрегации
+        
+        Args:
+            filename (str): Имя файла
+            product (str): Название продукции
+            marking_codes (List[str]): Список кодов маркировки
+            level1_codes (List[str]): Список кодов агрегации 1 уровня
+            level2_codes (List[str]): Список кодов агрегации 2 уровня
+            comment (str, optional): Комментарий к файлу. По умолчанию "".
+            json_content (str, optional): Полное содержимое JSON-файла. По умолчанию "".
+            
+        Returns:
+            AggregationFile: Объект файла агрегации
+        """
+        try:
+            cursor = self.conn.cursor()
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Преобразуем списки в JSON-строки
+            marking_codes_json = json.dumps(marking_codes)
+            level1_codes_json = json.dumps(level1_codes)
+            level2_codes_json = json.dumps(level2_codes)
+            
+            cursor.execute('''
+                INSERT INTO aggregation_files 
+                (filename, product, marking_codes, level1_codes, level2_codes, comment, json_content, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (filename, product, marking_codes_json, level1_codes_json, level2_codes_json, comment, json_content, current_time, current_time))
+            
+            file_id = cursor.lastrowid
+            self.conn.commit()
+            
+            # Создаем и возвращаем объект файла агрегации
+            return AggregationFile(
+                id=file_id,
+                filename=filename,
+                product=product,
+                marking_codes=marking_codes,
+                level1_codes=level1_codes,
+                level2_codes=level2_codes,
+                comment=comment,
+                json_content=json_content,
+                created_at=datetime.strptime(current_time, "%Y-%m-%d %H:%M:%S")
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении файла агрегации: {str(e)}")
+            raise e
+            
+    def get_aggregation_files(self) -> List[AggregationFile]:
+        """Получение списка всех файлов агрегации
+        
+        Returns:
+            List[AggregationFile]: Список объектов файлов агрегации
+        """
+        try:
+            cursor = self.conn.cursor()
+            
+            # Проверяем, существует ли колонка product
+            cursor.execute("PRAGMA table_info(aggregation_files)")
+            columns = cursor.fetchall()
+            column_names = [column["name"] for column in columns]
+            
+            logger.info(f"Колонки в таблице aggregation_files: {column_names}")
+            
+            # Если колонки нет, добавляем их
+            schema_updated = False
+            if "product" not in column_names:
+                cursor.execute("ALTER TABLE aggregation_files ADD COLUMN product TEXT")
+                schema_updated = True
+                logger.info("Добавлена колонка product в таблицу aggregation_files")
+                
+            if "json_content" not in column_names:
+                cursor.execute("ALTER TABLE aggregation_files ADD COLUMN json_content TEXT")
+                schema_updated = True
+                logger.info("Добавлена колонка json_content в таблицу aggregation_files")
+                
+            if schema_updated:
+                self.conn.commit()
+                logger.info("Автоматическое обновление схемы таблицы aggregation_files завершено")
+            
+            cursor.execute('''
+                SELECT id, filename, product, marking_codes, level1_codes, level2_codes, comment, json_content, created_at
+                FROM aggregation_files
+                ORDER BY created_at DESC
+            ''')
+            
+            result = []
+            for row in cursor.fetchall():
+                # Логирование для отладки
+                logger.info(f"Получен файл из БД: {row['filename']}")
+                
+                # Преобразуем JSON-строки обратно в списки
+                marking_codes = []
+                level1_codes = []
+                level2_codes = []
+                
+                try:
+                    if row['marking_codes']:
+                        marking_codes = json.loads(row['marking_codes'])
+                    if row['level1_codes']:
+                        level1_codes = json.loads(row['level1_codes'])
+                    if row['level2_codes']:
+                        level2_codes = json.loads(row['level2_codes'])
+                except json.JSONDecodeError as e:
+                    logger.error(f"Ошибка при десериализации JSON для файла {row['filename']}: {str(e)}")
+                
+                # Получаем product и json_content, если они есть
+                product = row['product'] if 'product' in row.keys() else ""
+                json_content = row['json_content'] if 'json_content' in row.keys() else ""
+                
+                logger.info(f"Файл {row['filename']}: продукция='{product}', коды маркировки={len(marking_codes)}, " +
+                    f"коды 1 уровня={len(level1_codes)}, коды 2 уровня={len(level2_codes)}")
+                
+                # Создаем объект файла агрегации
+                file = AggregationFile(
+                    id=row['id'],
+                    filename=row['filename'],
+                    product=product,
+                    marking_codes=marking_codes,
+                    level1_codes=level1_codes,
+                    level2_codes=level2_codes,
+                    comment=row['comment'],
+                    json_content=json_content,
+                    created_at=datetime.strptime(row['created_at'], "%Y-%m-%d %H:%M:%S") if row['created_at'] else None
+                )
+                result.append(file)
+                
+            logger.info(f"Всего получено файлов агрегации: {len(result)}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Ошибка при получении списка файлов агрегации: {str(e)}")
+            raise e
+            
+    def get_aggregation_file_by_id(self, file_id: int) -> Optional[AggregationFile]:
+        """Получение файла агрегации по ID
+        
+        Args:
+            file_id (int): ID файла агрегации
+            
+        Returns:
+            Optional[AggregationFile]: Объект файла агрегации или None, если файл не найден
+        """
+        try:
+            logger.info(f"Запрос файла агрегации с ID={file_id}")
+            
+            # Проверяем соединение
+            if not self.conn:
+                logger.error("Отсутствует соединение с базой данных")
+                return None
+            
+            # Выполняем запрос
+            cursor = self.conn.cursor()
+            
+            # Проверяем, существует ли запись с таким ID
+            cursor.execute("SELECT COUNT(*) FROM aggregation_files WHERE id = ?", (file_id,))
+            count = cursor.fetchone()[0]
+            if count == 0:
+                logger.warning(f"Файл агрегации с ID={file_id} не найден в базе данных")
+                return None
+                
+            logger.info(f"Файл агрегации с ID={file_id} найден в базе данных")
+            
+            cursor.execute(
+                """
+                SELECT id, filename, product, comment, json_content, 
+                       marking_codes, level1_codes, level2_codes, created_at
+                FROM aggregation_files
+                WHERE id = ?
+                """,
+                (file_id,)
+            )
+            
+            row = cursor.fetchone()
+            if not row:
+                logger.warning(f"Не удалось получить данные для файла агрегации с ID={file_id}")
+                return None
+            
+            logger.info(f"Данные получены для файла {row[1]} (ID={file_id})")
+            
+            # Преобразуем JSON-строки в списки
+            marking_codes = []
+            level1_codes = []
+            level2_codes = []
+            
+            try:
+                if row[5]:
+                    marking_codes = json.loads(row[5])
+                    logger.info(f"Количество кодов маркировки: {len(marking_codes)}")
+                if row[6]:
+                    level1_codes = json.loads(row[6])
+                    logger.info(f"Количество кодов 1 уровня: {len(level1_codes)}")
+                if row[7]:
+                    level2_codes = json.loads(row[7])
+                    logger.info(f"Количество кодов 2 уровня: {len(level2_codes)}")
+            except json.JSONDecodeError as e:
+                logger.error(f"Ошибка при десериализации JSON для файла {row[1]}: {str(e)}")
+            
+            # Данные json_content, если есть
+            json_content = row[4] if row[4] else ""
+            
+            # Пытаемся преобразовать json_content в словарь для параметра data
+            data = {}
+            if json_content:
+                try:
+                    data = json.loads(json_content)
+                    logger.info(f"Данные JSON успешно десериализованы, размер: {len(str(data))} символов")
+                except json.JSONDecodeError:
+                    logger.error(f"Не удалось преобразовать json_content в словарь для файла {row[1]}")
+            
+            # Создаем и возвращаем объект AggregationFile
+            file = AggregationFile(
+                id=row[0],
+                filename=row[1],
+                product=row[2],
+                marking_codes=marking_codes,
+                level1_codes=level1_codes,
+                level2_codes=level2_codes,
+                comment=row[3],
+                json_content=json_content,
+                created_at=datetime.strptime(row[8], "%Y-%m-%d %H:%M:%S") if row[8] else None,
+                data=data
+            )
+            
+            logger.info(f"Объект AggregationFile успешно создан для файла {row[1]} (ID={file_id})")
+            return file
+            
+        except Exception as e:
+            logger.error(f"Ошибка при получении файла агрегации по ID: {str(e)}")
+            logger.exception("Подробная трассировка ошибки:")
+            return None
+    
+    def delete_aggregation_file(self, file_id: int) -> bool:
+        """Удаление файла агрегации по ID
+        
+        Args:
+            file_id (int): ID файла агрегации
+            
+        Returns:
+            bool: True, если файл успешно удален, иначе False
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                DELETE FROM aggregation_files
+                WHERE id = ?
+            ''', (file_id,))
+            
+            self.conn.commit()
+            return cursor.rowcount > 0
+            
+        except Exception as e:
+            logger.error(f"Ошибка при удалении файла агрегации: {str(e)}")
+            raise e
+    
+    def init_tables(self):
+        """Инициализация таблиц базы данных"""
+        try:
+            # Создаем таблицы, если они не существуют
+            self.conn.executescript('''
+                -- Таблица для хранения подключений
+                CREATE TABLE IF NOT EXISTS connections (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    is_active INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                
+                -- Таблица для хранения учетных данных
+                CREATE TABLE IF NOT EXISTS credentials (
+                    id INTEGER PRIMARY KEY,
+                    omsid TEXT NOT NULL,
+                    token TEXT NOT NULL,
+                    gln TEXT NOT NULL,
+                    connection_id INTEGER NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (connection_id) REFERENCES connections(id) ON DELETE SET NULL
+                );
+                
+                -- Таблица для хранения номенклатуры
+                CREATE TABLE IF NOT EXISTS nomenclature (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    gtin TEXT NOT NULL UNIQUE,
+                    product_group TEXT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                
+                -- Таблица для хранения расширений API
+                CREATE TABLE IF NOT EXISTS extensions (
+                    id INTEGER PRIMARY KEY,
+                    code TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    is_active INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                
+                -- Таблица для хранения логов API
+                CREATE TABLE IF NOT EXISTS api_logs (
+                    id INTEGER PRIMARY KEY,
+                    method TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    status_code INTEGER NULL,
+                    success INTEGER DEFAULT 0,
+                    request TEXT NULL,
+                    response TEXT NULL,
+                    description TEXT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                
+                -- Таблица для хранения стран
+                CREATE TABLE IF NOT EXISTS countries (
+                    id INTEGER PRIMARY KEY,
+                    code TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                
+                -- Таблица для хранения статусов заказов
+                CREATE TABLE IF NOT EXISTS order_statuses (
+                    id INTEGER PRIMARY KEY,
+                    code TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    description TEXT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                
+                -- Таблица для хранения API заказов
+                CREATE TABLE IF NOT EXISTS api_orders (
+                    id INTEGER PRIMARY KEY,
+                    order_id TEXT NOT NULL UNIQUE,
+                    order_status TEXT NULL,
+                    order_status_description TEXT NULL,
+                    created_timestamp TEXT NULL,
+                    total_quantity INTEGER NULL,
+                    num_of_products INTEGER NULL,
+                    product_group_type TEXT NULL,
+                    signed INTEGER DEFAULT 0,
+                    verified INTEGER DEFAULT 0,
+                    is_obsolete INTEGER DEFAULT 0,
+                    buffers TEXT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                
+                -- Таблица для хранения кодов маркировки
+                CREATE TABLE IF NOT EXISTS marking_codes (
+                    id INTEGER PRIMARY KEY,
+                    code TEXT NOT NULL UNIQUE,
+                    gtin TEXT NOT NULL,
+                    order_id TEXT NOT NULL,
+                    used INTEGER DEFAULT 0,
+                    exported INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                
+                -- Таблица для хранения файлов агрегации
+                CREATE TABLE IF NOT EXISTS aggregation_files (
+                    id INTEGER PRIMARY KEY,
+                    filename TEXT NOT NULL,
+                    product TEXT NULL,
+                    comment TEXT NULL,
+                    json_content TEXT NULL,
+                    marking_codes TEXT NULL,
+                    level1_codes TEXT NULL,
+                    level2_codes TEXT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                
+                -- Таблица для хранения типов использования кодов маркировки
+                CREATE TABLE IF NOT EXISTS usage_types (
+                    id INTEGER PRIMARY KEY,
+                    code TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    description TEXT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            ''')
+            
+            # Заполняем таблицы значениями по умолчанию
+            self.init_default_data()
+            
+            self.conn.commit()
+            
+            logger.info("Таблицы успешно инициализированы")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Ошибка при инициализации таблиц: {str(e)}")
+            return False
+    
+    def init_default_data(self):
+        """Инициализация данных по умолчанию"""
+        try:
+            # Проверяем, есть ли в базе данных расширения API
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM extensions")
+            count = cursor.fetchone()[0]
+            
+            # Если нет расширений, добавляем их
+            if count == 0:
+                logger.info("Добавление расширений API по умолчанию")
+                
+                # Заполняем таблицу расширений API
+                extensions = [
+                    ("pharma", "Фармацевтическая продукция", 1),  # По умолчанию активно
+                    ("tobacco", "Табачная продукция", 0),
+                    ("shoes", "Обувь", 0),
+                    ("milk", "Молочная продукция", 0),
+                    ("alcohol", "Алкогольная продукция", 0),
+                    ("lp", "Легкая промышленность", 0),
+                    ("water", "Вода", 0)
+                ]
+                
+                for ext in extensions:
+                    cursor.execute(
+                        "INSERT INTO extensions (code, name, is_active) VALUES (?, ?, ?)",
+                        ext
+                    )
+            
+            # Проверяем, есть ли в базе данных страны
+            cursor.execute("SELECT COUNT(*) FROM countries")
+            count = cursor.fetchone()[0]
+            
+            # Если нет стран, добавляем их
+            if count == 0:
+                logger.info("Добавление стран по умолчанию")
+                
+                # Заполняем таблицу стран
+                countries = [
+                    ("BY", "Беларусь"),
+                    ("RU", "Россия"),
+                    ("KZ", "Казахстан"),
+                    ("AM", "Армения"),
+                    ("KG", "Киргизия")
+                ]
+                
+                for country in countries:
+                    cursor.execute(
+                        "INSERT INTO countries (code, name) VALUES (?, ?)",
+                        country
+                    )
+            
+            # Проверяем, есть ли в базе данных статусы заказов
+            cursor.execute("SELECT COUNT(*) FROM order_statuses")
+            count = cursor.fetchone()[0]
+            
+            # Если нет статусов, добавляем их
+            if count == 0:
+                logger.info("Добавление статусов заказов по умолчанию")
+                
+                # Заполняем таблицу статусов заказов
+                statuses = [
+                    ("CREATED", "Создан", "Заказ создан, но еще не обработан"),
+                    ("PENDING", "В обработке", "Заказ находится в процессе обработки"),
+                    ("READY", "Готов", "Заказ готов к использованию"),
+                    ("DECLINED", "Отклонен", "Заказ был отклонен"),
+                    ("CLOSED", "Закрыт", "Заказ закрыт")
+                ]
+                
+                for status in statuses:
+                    cursor.execute(
+                        "INSERT INTO order_statuses (code, name, description) VALUES (?, ?, ?)",
+                        status
+                    )
+            
+            # Проверяем, есть ли в базе данных типы использования кодов маркировки
+            cursor.execute("SELECT COUNT(*) FROM usage_types")
+            count = cursor.fetchone()[0]
+            
+            # Если нет типов использования, добавляем их
+            if count == 0:
+                logger.info("Добавление типов использования кодов маркировки по умолчанию")
+                
+                # Заполняем таблицу типов использования
+                usage_types = [
+                    ("PRINTED", "КМ был напечатан", "Код маркировки был напечатан на упаковке"),
+                    ("VERIFIED", "Нанесение КМ подтверждено", "Нанесение кода маркировки было подтверждено")
+                ]
+                
+                for usage_type in usage_types:
+                    cursor.execute(
+                        "INSERT INTO usage_types (code, name, description) VALUES (?, ?, ?)",
+                        usage_type
+                    )
+            
+            self.conn.commit()
+            logger.info("Данные по умолчанию успешно добавлены")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при инициализации данных по умолчанию: {str(e)}")
+            raise
+
+    # Методы для работы с типами использования кодов маркировки (UsageType)
+    def get_usage_types(self) -> List[UsageType]:
+        """Получение списка типов использования кодов маркировки
+        
+        Returns:
+            List[UsageType]: Список объектов типов использования
+        """
+        try:
+            # Проверяем соединение
+            if not self.conn:
+                self.connect()
+            
+            # Выполняем запрос
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, code, name, description
+                FROM usage_types
+                ORDER BY id
+                """
+            )
+            
+            # Обрабатываем результат
+            usage_types = []
+            for row in cursor.fetchall():
+                usage_type = UsageType(
+                    id=row[0],
+                    code=row[1],
+                    name=row[2],
+                    description=row[3]
+                )
+                usage_types.append(usage_type)
+            
+            return usage_types
+        
+        except Exception as e:
+            logger.error(f"Ошибка при получении списка типов использования: {str(e)}")
+            return []
+    
+    def add_usage_type(self, code: str, name: str, description: str = None) -> int:
+        """Добавление нового типа использования
+        
+        Args:
+            code (str): Код типа использования
+            name (str): Название типа использования
+            description (str, optional): Описание типа использования
+            
+        Returns:
+            int: ID добавленного типа использования или -1 в случае ошибки
+        """
+        try:
+            # Проверяем соединение
+            if not self.conn:
+                logger.error("Отсутствует соединение с базой данных")
+                self.connect()
+                if not self.conn:
+                    logger.error("Не удалось установить соединение с базой данных")
+                    return -1
+            
+            # Проверяем наличие таблицы
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='usage_types'")
+            if not cursor.fetchone():
+                logger.warning("Таблица usage_types отсутствует. Создаем таблицу...")
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS usage_types (
+                        id INTEGER PRIMARY KEY,
+                        code TEXT NOT NULL UNIQUE,
+                        name TEXT NOT NULL,
+                        description TEXT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                self.conn.commit()
+                logger.info("Таблица usage_types успешно создана")
+            
+            # Проверяем, существует ли уже запись с таким кодом
+            cursor.execute("SELECT id FROM usage_types WHERE code = ?", (code,))
+            existing = cursor.fetchone()
+            if existing:
+                logger.error(f"Тип использования с кодом '{code}' уже существует (ID={existing[0]})")
+                return -1
+            
+            # Выполняем вставку с нормализованными данными
+            code = code.strip()
+            name = name.strip()
+            description = description.strip() if description else None
+            
+            logger.info(f"Вставка записи в таблицу usage_types: code='{code}', name='{name}', description='{description}'")
+            cursor.execute(
+                """
+                INSERT INTO usage_types (code, name, description)
+                VALUES (?, ?, ?)
+                """,
+                (code, name, description)
+            )
+            
+            # Получаем ID добавленной записи
+            usage_type_id = cursor.lastrowid
+            logger.info(f"Вставка выполнена, ID={usage_type_id}")
+            
+            # Фиксируем изменения
+            self.conn.commit()
+            logger.info("Изменения зафиксированы в базе данных")
+            
+            return usage_type_id
+            
+        except sqlite3.IntegrityError as e:
+            logger.error(f"Ошибка целостности данных при добавлении типа использования: {str(e)}")
+            # Если ошибка связана с уникальностью кода
+            if 'UNIQUE constraint failed: usage_types.code' in str(e):
+                logger.error(f"Тип использования с кодом '{code}' уже существует")
+            return -1
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении типа использования: {str(e)}")
+            logger.exception("Подробная трассировка ошибки:")
+            return -1
+    
+    def update_usage_type(self, usage_type_id: int, code: str, name: str, description: str = None) -> bool:
+        """Обновление типа использования
+        
+        Args:
+            usage_type_id (int): ID типа использования
+            code (str): Код типа использования
+            name (str): Название типа использования
+            description (str, optional): Описание типа использования
+            
+        Returns:
+            bool: True, если обновление прошло успешно, иначе False
+        """
+        try:
+            # Проверяем соединение
+            if not self.conn:
+                self.connect()
+            
+            # Подготавливаем запрос
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                UPDATE usage_types
+                SET code = ?, name = ?, description = ?
+                WHERE id = ?
+                """,
+                (code, name, description, usage_type_id)
+            )
+            
+            # Фиксируем изменения
+            self.conn.commit()
+            
+            return cursor.rowcount > 0
+            
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении типа использования: {str(e)}")
+            return False
+    
+    def delete_usage_type(self, usage_type_id: int) -> bool:
+        """Удаление типа использования
+        
+        Args:
+            usage_type_id (int): ID типа использования
+            
+        Returns:
+            bool: True, если удаление прошло успешно, иначе False
+        """
+        try:
+            # Проверяем соединение
+            if not self.conn:
+                self.connect()
+            
+            # Подготавливаем запрос
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                DELETE FROM usage_types
+                WHERE id = ?
+                """,
+                (usage_type_id,)
+            )
+            
+            # Фиксируем изменения
+            self.conn.commit()
+            
+            return cursor.rowcount > 0
+            
+        except Exception as e:
+            logger.error(f"Ошибка при удалении типа использования: {str(e)}")
             return False

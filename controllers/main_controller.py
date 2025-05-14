@@ -77,45 +77,49 @@ class MainController(QObject):
             logger.error(f"Ошибка при работе с описаниями методов API: {str(e)}")
     
     def connect_signals(self):
-        """Подключение сигналов и слотов"""
-        # Сигналы вкладки заказов
-        self.view.add_order_signal.connect(self.add_order)
-        self.view.ping_signal.connect(self.check_api)
-        self.view.get_orders_signal.connect(self.get_orders)
-        self.view.get_report_signal.connect(self.get_report)
-        self.view.get_version_signal.connect(self.get_version)
-        self.view.get_orders_status_signal.connect(self.get_orders_status)
-        self.view.create_emission_order_signal.connect(self.create_emission_order)
-        self.view.get_order_details_signal.connect(self.get_order_details)
-        self.view.api_orders_signal.connect(self.get_api_orders)
+        """Подключение сигналов к слотам"""
+        # Сигналы от view к controller
+        
+        # API заказы
+        self.view.api_orders_signal.connect(self.load_api_orders)
         self.view.delete_api_order_signal.connect(self.delete_api_order)
         self.view.get_km_from_order_signal.connect(self.get_km_from_order)
         
-        # Сигналы вкладки подключений
+        # Сигналы для работы с заказами
+        self.view.get_orders_signal.connect(self.get_orders)
+        self.view.get_order_details_signal.connect(self.get_order_details)
+        self.view.add_order_signal.connect(self.add_order)
+        self.view.ping_signal.connect(self.check_api)
+        self.view.get_orders_status_signal.connect(self.get_orders_status)
+        self.view.get_report_signal.connect(self.get_report)
+        self.view.get_version_signal.connect(self.get_version)
+        self.view.create_emission_order_signal.connect(self.create_emission_order)
+        
+        # Сигналы для работы с подключениями
         self.view.add_connection_signal.connect(self.add_connection)
         self.view.edit_connection_signal.connect(self.edit_connection)
         self.view.delete_connection_signal.connect(self.delete_connection)
         self.view.set_active_connection_signal.connect(self.set_active_connection)
         
-        # Сигналы вкладки учетных данных
+        # Сигналы для работы с учетными данными
         self.view.add_credentials_signal.connect(self.add_credentials)
         self.view.edit_credentials_signal.connect(self.edit_credentials)
         self.view.delete_credentials_signal.connect(self.delete_credentials)
         
-        # Сигналы вкладки номенклатуры
+        # Сигналы для работы с номенклатурой
         self.view.add_nomenclature_signal.connect(self.add_nomenclature)
         self.view.edit_nomenclature_signal.connect(self.edit_nomenclature)
         self.view.delete_nomenclature_signal.connect(self.delete_nomenclature)
         
-        # Сигналы вкладки расширений API
+        # Сигналы для работы с расширениями API
         self.view.set_active_extension_signal.connect(self.set_active_extension)
         
-        # Сигналы вкладки логов API
+        # Сигналы для работы с логами API
         self.view.load_api_logs_signal.connect(self.load_api_logs)
         self.view.get_api_log_details_signal.connect(self.on_get_api_log_details)
         self.view.export_api_descriptions_signal.connect(self.export_api_descriptions)
         
-        # Сигналы вкладки стран
+        # Сигналы для работы со странами
         self.view.load_countries_signal.connect(self.load_countries)
         
         # Сигналы для работы со статусами заказов
@@ -124,10 +128,23 @@ class MainController(QObject):
         self.view.edit_order_status_signal.connect(self.edit_order_status)
         self.view.delete_order_status_signal.connect(self.delete_order_status)
         
+        # Сигналы для работы с типами использования кодов маркировки
+        self.view.load_usage_types_signal.connect(self.load_usage_types)
+        self.view.add_usage_type_signal.connect(self.add_usage_type)
+        self.view.edit_usage_type_signal.connect(self.update_usage_type)
+        self.view.delete_usage_type_signal.connect(self.delete_usage_type)
+        
         # Сигналы для работы с кодами маркировки
         self.view.get_marking_codes_signal.connect(self.get_marking_codes)
         self.view.mark_codes_as_used_signal.connect(self.mark_codes_as_used)
         self.view.mark_codes_as_exported_signal.connect(self.mark_codes_as_exported)
+        
+        # Сигналы для работы с файлами агрегации
+        self.view.load_aggregation_files_signal.connect(self.load_aggregation_files)
+        self.view.add_aggregation_file_signal.connect(self.add_aggregation_file)
+        self.view.delete_aggregation_file_signal.connect(self.delete_aggregation_file)
+        self.view.export_aggregation_file_signal.connect(self.export_aggregation_file)
+        self.view.send_utilisation_report_signal.connect(self.send_utilisation_report)
     
     def load_all_data(self):
         """Загрузка всех данных из базы данных"""
@@ -140,6 +157,7 @@ class MainController(QObject):
         self.load_order_statuses()
         self.load_api_logs()
         self.load_marking_codes()
+        self.load_aggregation_files()
     
     def load_orders(self):
         """Загрузка заказов из базы данных"""
@@ -1361,4 +1379,599 @@ class MainController(QObject):
             
         except Exception as e:
             logger.error(f"Ошибка при загрузке кодов маркировки: {str(e)}")
-            self.view.show_message("Ошибка", f"Ошибка при загрузке кодов маркировки: {str(e)}") 
+            self.view.show_message("Ошибка", f"Ошибка при загрузке кодов маркировки: {str(e)}")
+
+    # Методы для работы с файлами агрегации
+    def load_aggregation_files(self):
+        """Загрузка файлов агрегации из базы данных"""
+        try:
+            files = self.db.get_aggregation_files()
+            self.view.update_aggregation_files_table(files)
+            logger.info("Таблица файлов агрегации обновлена")
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке файлов агрегации: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при загрузке файлов агрегации: {str(e)}")
+
+    def add_aggregation_file(self, filename: str, data: Dict, comment: str):
+        """Добавление нового файла агрегации
+        
+        Args:
+            filename (str): Имя файла
+            data (Dict): Данные из JSON-файла
+            comment (str): Комментарий к файлу
+        """
+        try:
+            # Получаем название продукции
+            product = data.get('NameProduct', "")
+            # Если название продукции пустое, попробуем найти в других возможных полях
+            if not product:
+                # Проверяем другие возможные названия поля продукции
+                possible_product_fields = ['nameProduct', 'productName', 'name', 'product', 'Product']
+                for field in possible_product_fields:
+                    if field in data and data[field]:
+                        product = data[field]
+                        logger.info(f"Найдено название продукции в поле '{field}': {product}")
+                        break
+                        
+                # Если всё еще не нашли, попробуем поискать в глубине JSON
+                if not product:
+                    def find_product_name(obj, path=""):
+                        if isinstance(obj, dict):
+                            for key, value in obj.items():
+                                key_lower = key.lower()
+                                if 'product' in key_lower and 'name' in key_lower and isinstance(value, str):
+                                    return value
+                                elif key_lower in ['nameproduct', 'productname', 'name', 'product'] and isinstance(value, str):
+                                    return value
+                                
+                                result = find_product_name(value, f"{path}.{key}" if path else key)
+                                if result:
+                                    return result
+                        elif isinstance(obj, list):
+                            for i, item in enumerate(obj):
+                                result = find_product_name(item, f"{path}[{i}]")
+                                if result:
+                                    return result
+                        return None
+                        
+                    product_from_search = find_product_name(data)
+                    if product_from_search:
+                        product = product_from_search
+                        logger.info(f"Найдено название продукции при глубоком поиске: {product}")
+            
+            logger.info(f"Обработка файла агрегации: {filename}")
+            logger.info(f"Название продукции: {product}")
+            
+            # Попробуем найти элементы разными способами
+            marking_codes = []  # уровень 0
+            level1_codes = []   # уровень 1
+            level2_codes = []   # уровень 2
+            
+            # Для хранения всех кодов (для отметки использованных)
+            all_codes = set()
+            
+            # Логирование ключей в JSON
+            logger.info(f"Ключи в JSON: {list(data.keys())}")
+            
+            # Метод 1: Проверяем наличие поля 'items'
+            items = data.get('items', [])
+            if items and isinstance(items, list):
+                logger.info(f"Найдено поле 'items' с {len(items)} элементами")
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    level = item.get('level', 0)
+                    barcode = item.get('Barcode', '')
+                    if barcode:
+                        # Нормализуем формат кода - заменяем \u001d на [GS]
+                        normalized_barcode = self.normalize_barcode(barcode)
+                        all_codes.add(normalized_barcode)  # Добавляем в общий набор кодов
+                        if level == 0:
+                            marking_codes.append(normalized_barcode)
+                        elif level == 1:
+                            level1_codes.append(normalized_barcode)
+                        elif level == 2:
+                            level2_codes.append(normalized_barcode)
+            
+            # Если кодов всё ещё нет, попробуем другой метод
+            if not marking_codes and not level1_codes and not level2_codes:
+                # Метод 2: Проверяем каждый ключ в данных
+                for key, value in data.items():
+                    if isinstance(value, dict):
+                        # Если значение - словарь, проверяем его поля
+                        level = value.get('level', None)
+                        barcode = value.get('Barcode', '')
+                        if barcode and level is not None:
+                            # Нормализуем формат кода
+                            normalized_barcode = self.normalize_barcode(barcode)
+                            all_codes.add(normalized_barcode)  # Добавляем в общий набор кодов
+                            if level == 0:
+                                marking_codes.append(normalized_barcode)
+                            elif level == 1:
+                                level1_codes.append(normalized_barcode)
+                            elif level == 2:
+                                level2_codes.append(normalized_barcode)
+                    elif isinstance(value, list):
+                        # Если значение - список, проверяем каждый элемент
+                        for item in value:
+                            if isinstance(item, dict):
+                                level = item.get('level', None)
+                                barcode = item.get('Barcode', '')
+                                if barcode and level is not None:
+                                    # Нормализуем формат кода
+                                    normalized_barcode = self.normalize_barcode(barcode)
+                                    all_codes.add(normalized_barcode)  # Добавляем в общий набор кодов
+                                    if level == 0:
+                                        marking_codes.append(normalized_barcode)
+                                    elif level == 1:
+                                        level1_codes.append(normalized_barcode)
+                                    elif level == 2:
+                                        level2_codes.append(normalized_barcode)
+            
+            # Если кодов все ещё нет, попробуем рекурсивный метод для поиска
+            if not marking_codes and not level1_codes and not level2_codes:
+                logger.info("Пробуем рекурсивный поиск Barcode и level")
+                
+                def search_in_json(obj, path=""):
+                    if isinstance(obj, dict):
+                        # Проверяем, есть ли в этом словаре Barcode и level
+                        barcode = obj.get('Barcode', '')
+                        level = obj.get('level', None)
+                        if barcode and level is not None:
+                            logger.info(f"Найден Barcode: {barcode}, level: {level} по пути {path}")
+                            # Нормализуем формат кода
+                            normalized_barcode = self.normalize_barcode(barcode)
+                            all_codes.add(normalized_barcode)  # Добавляем в общий набор кодов
+                            if level == 0:
+                                marking_codes.append(normalized_barcode)
+                            elif level == 1:
+                                level1_codes.append(normalized_barcode)
+                            elif level == 2:
+                                level2_codes.append(normalized_barcode)
+                        
+                        # Проверяем вложенные элементы
+                        for key, value in obj.items():
+                            search_in_json(value, f"{path}.{key}" if path else key)
+                    elif isinstance(obj, list):
+                        for i, item in enumerate(obj):
+                            search_in_json(item, f"{path}[{i}]")
+                
+                search_in_json(data)
+            
+            # Логирование результатов
+            logger.info(f"Найдено кодов маркировки (уровень 0): {len(marking_codes)}")
+            logger.info(f"Найдено кодов агрегации 1 уровня: {len(level1_codes)}")
+            logger.info(f"Найдено кодов агрегации 2 уровня: {len(level2_codes)}")
+            logger.info(f"Всего уникальных кодов: {len(all_codes)}")
+            
+            # Сохраняем полное содержимое JSON
+            json_content = json.dumps(data)
+            
+            # Добавляем файл в базу данных
+            file = self.db.add_aggregation_file(
+                filename=filename,
+                product=product,
+                marking_codes=marking_codes,
+                level1_codes=level1_codes,
+                level2_codes=level2_codes,
+                comment=comment,
+                json_content=json_content
+            )
+            
+            # Отмечаем коды как использованные в таблице "Коды маркировки"
+            if all_codes:
+                self.mark_codes_used_by_barcodes(list(all_codes))
+            
+            # Обновляем таблицу файлов агрегации
+            self.load_aggregation_files()
+            
+            logger.info(f"Файл агрегации '{filename}' успешно добавлен")
+            self.view.show_message("Успех", f"Файл агрегации '{filename}' успешно добавлен")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении файла агрегации: {str(e)}")
+            logger.exception("Подробная информация об ошибке:")
+            self.view.show_message("Ошибка", f"Ошибка при добавлении файла агрегации: {str(e)}")
+
+    def normalize_barcode(self, barcode):
+        """Нормализует формат штрих-кода, заменяя различные представления разделителя GS
+        
+        Args:
+            barcode (str): Исходный штрих-код
+            
+        Returns:
+            str: Нормализованный штрих-код
+        """
+        # Заменяем различные представления разделителя GS на [GS]
+        normalized = barcode
+        
+        # Заменяем \u001d (unicode) на [GS]
+        normalized = normalized.replace('\u001d', '[GS]')
+        
+        # Заменяем литеральную строку '\u001d' на [GS]
+        normalized = normalized.replace('\\u001d', '[GS]')
+        
+        # Заменяем ASCII-код 29 (GS) на [GS]
+        if '\x1d' in normalized:
+            normalized = normalized.replace('\x1d', '[GS]')
+        
+        logger.debug(f"Нормализация штрих-кода: '{barcode}' -> '{normalized}'")
+        return normalized
+
+    def delete_aggregation_file(self, file_id: int):
+        """Удаление файла агрегации
+        
+        Args:
+            file_id (int): ID файла агрегации
+        """
+        try:
+            # Получаем информацию о файле для сообщения
+            file = self.db.get_aggregation_file_by_id(file_id)
+            if not file:
+                self.view.show_message("Ошибка", f"Файл агрегации с ID {file_id} не найден")
+                return
+            
+            # Собираем все коды из файла
+            all_codes = set()
+            all_codes.update(file.marking_codes)
+            all_codes.update(file.level1_codes)
+            all_codes.update(file.level2_codes)
+            
+            # Удаляем файл из базы данных
+            if self.db.delete_aggregation_file(file_id):
+                # Отмечаем коды как неиспользованные в таблице "Коды маркировки"
+                if all_codes:
+                    self.unmark_codes_used_by_barcodes(list(all_codes))
+                    
+                # Обновляем таблицу файлов агрегации
+                self.load_aggregation_files()
+                
+                logger.info(f"Файл агрегации '{file.filename}' успешно удален")
+                self.view.show_message("Успех", f"Файл агрегации '{file.filename}' успешно удален")
+            else:
+                self.view.show_message("Ошибка", f"Не удалось удалить файл агрегации с ID {file_id}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при удалении файла агрегации: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при удалении файла агрегации: {str(e)}")
+        
+    def mark_codes_used_by_barcodes(self, barcodes: List[str]):
+        """Отметить коды маркировки как использованные по значению штрих-кода
+        
+        Args:
+            barcodes (List[str]): Список штрих-кодов
+        """
+        try:
+            # Получаем ID кодов маркировки по значениям штрих-кодов
+            code_ids = self.db.get_marking_code_ids_by_barcodes(barcodes)
+            
+            if code_ids:
+                logger.info(f"Найдено {len(code_ids)} кодов маркировки для отметки как использованные")
+                # Отмечаем их как использованные
+                self.mark_codes_as_used(code_ids)
+            else:
+                logger.info("Не найдено кодов маркировки для отметки как использованные")
+                
+        except Exception as e:
+            logger.error(f"Ошибка при отметке кодов как использованных по штрих-кодам: {str(e)}")
+        
+    def unmark_codes_used_by_barcodes(self, barcodes: List[str]):
+        """Снять отметку 'использованные' с кодов маркировки по значению штрих-кода
+        
+        Args:
+            barcodes (List[str]): Список штрих-кодов
+        """
+        try:
+            # Получаем ID кодов маркировки по значениям штрих-кодов
+            code_ids = self.db.get_marking_code_ids_by_barcodes(barcodes)
+            
+            if code_ids:
+                logger.info(f"Найдено {len(code_ids)} кодов маркировки для снятия отметки 'использованные'")
+                # Снимаем отметку 'использованные'
+                self.db.unmark_codes_as_used(code_ids)
+                # Обновляем таблицу кодов маркировки, если она открыта
+                self.load_marking_codes()
+            else:
+                logger.info("Не найдено кодов маркировки для снятия отметки 'использованные'")
+                
+        except Exception as e:
+            logger.error(f"Ошибка при снятии отметки 'использованные' с кодов по штрих-кодам: {str(e)}")
+
+    def export_aggregation_file(self, file_id: int, export_path: str):
+        """Экспорт файла агрегации в JSON-файл
+        
+        Args:
+            file_id (int): ID файла агрегации
+            export_path (str): Путь для сохранения файла
+        """
+        try:
+            # Получаем файл агрегации по ID
+            file = self.db.get_aggregation_file_by_id(file_id)
+            if not file:
+                self.view.show_message("Ошибка", f"Файл агрегации с ID {file_id} не найден")
+                return False
+            
+            # Проверяем, есть ли содержимое JSON
+            if not file.json_content:
+                self.view.show_message("Ошибка", f"В файле агрегации '{file.filename}' отсутствует содержимое JSON")
+                return False
+            
+            # Сохраняем содержимое JSON в файл
+            with open(export_path, 'w', encoding='utf-8') as f:
+                f.write(file.json_content)
+            
+            logger.info(f"Файл агрегации '{file.filename}' успешно экспортирован в '{export_path}'")
+            self.view.show_message("Успех", f"Файл агрегации успешно экспортирован в '{export_path}'")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Ошибка при экспорте файла агрегации: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при экспорте файла агрегации: {str(e)}")
+            return False
+
+    def get_aggregation_file_by_id(self, file_id: int):
+        """Получение файла агрегации по ID
+        
+        Args:
+            file_id (int): ID файла агрегации
+            
+        Returns:
+            Optional[AggregationFile]: Объект файла агрегации или None
+        """
+        try:
+            return self.db.get_aggregation_file_by_id(file_id)
+        except Exception as e:
+            logger.error(f"Ошибка при получении файла агрегации с ID={file_id}: {str(e)}")
+            logger.exception("Подробная трассировка ошибки:")
+            return None
+
+    def send_utilisation_report(self, report_data):
+        """Отправка отчета об использовании (нанесении) КМ"""
+        try:
+            # Проверяем наличие данных для отправки
+            if not report_data or 'sntins' not in report_data or not report_data['sntins']:
+                self.view.show_message("Ошибка", "Не выбраны коды маркировки для отчета")
+                return
+            
+            # Проверяем наличие omsId в отчете
+            if 'omsId' not in report_data or not report_data['omsId']:
+                # Если omsId отсутствует, пытаемся его получить из настроек API-клиента
+                if hasattr(self, 'api_client') and self.api_client and self.api_client.omsid:
+                    report_data['omsId'] = self.api_client.omsid
+                    logger.info(f"Добавлен omsId из API-клиента: {self.api_client.omsid}")
+                else:
+                    # Пытаемся получить omsId из базы данных
+                    try:
+                        credentials = self.db.get_credentials()
+                        if credentials and len(credentials) > 0:
+                            report_data['omsId'] = credentials[0].omsid
+                            logger.info(f"Добавлен omsId из БД: {credentials[0].omsid}")
+                    except Exception as e:
+                        logger.error(f"Не удалось получить omsId из БД: {str(e)}")
+            
+            # Логирование данных отчета (только для отладки)
+            logger.info(f"Отправка отчета о нанесении. Количество кодов: {len(report_data['sntins'])}")
+            logger.info(f"Пример кода: {report_data['sntins'][0] if report_data['sntins'] else 'нет кодов'}")
+            logger.info(f"Идентификатор СУЗ (omsId): {report_data.get('omsId', 'не указан')}")
+            
+            # Если omsId все еще отсутствует, выводим предупреждение
+            if 'omsId' not in report_data or not report_data['omsId']:
+                self.view.show_message(
+                    "Предупреждение", 
+                    "Отсутствует идентификатор СУЗ (omsId). Отчет может быть отклонен API. "
+                    "Проверьте настройки учетных данных."
+                )
+                logger.warning("omsId не найден для отчета о нанесении!")
+            
+            # Отправляем отчет через API-клиент
+            response = self.api_client.post_utilisation(report_data)
+            
+            # Обрабатываем ответ
+            if response.get('success', False):
+                # Если отчет успешно отправлен, отмечаем коды как использованные в БД
+                # TODO: Реализовать отметку кодов как использованных
+                
+                self.view.show_message("Отчет о нанесении", "Отчет успешно отправлен")
+            else:
+                error_message = "Ошибка при отправке отчета"
+                if 'fieldErrors' in response:
+                    field_errors = []
+                    for field_error in response['fieldErrors']:
+                        field_errors.append(f"{field_error.get('fieldName')}: {field_error.get('fieldError')}")
+                    error_message += ": " + ", ".join(field_errors)
+                elif 'globalErrors' in response:
+                    error_message += ": " + ", ".join(response['globalErrors'])
+                elif 'error' in response and isinstance(response['error'], dict) and 'message' in response['error']:
+                    error_message += ": " + response['error']['message']
+                
+                self.view.show_message("Ошибка", error_message)
+            
+        except Exception as e:
+            logger.error(f"Ошибка при отправке отчета: {str(e)}")
+            self.view.show_message("Ошибка", f"Не удалось отправить отчет: {str(e)}")
+
+    # Методы для работы с типами использования кодов маркировки
+    def load_usage_types(self):
+        """Загрузка типов использования кодов маркировки из базы данных"""
+        try:
+            # Получаем типы использования из базы данных
+            usage_types = self.db.get_usage_types()
+            logger.info(f"Загружено {len(usage_types)} типов использования кодов маркировки")
+            return usage_types
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке типов использования кодов маркировки: {str(e)}")
+            self.view.show_message("Ошибка", f"Не удалось загрузить типы использования кодов маркировки: {str(e)}")
+            return []
+    
+    def add_usage_type(self, code, name, description=None):
+        """Добавление типа использования кодов маркировки"""
+        try:
+            logger.info(f"Запрос на добавление типа использования: code='{code}', name='{name}', description='{description}'")
+            
+            # Проверка входных данных
+            if not code or not code.strip():
+                logger.error("Код типа использования не может быть пустым")
+                self.view.show_message("Ошибка", "Код типа использования не может быть пустым")
+                return False
+                
+            if not name or not name.strip():
+                logger.error("Название типа использования не может быть пустым")
+                self.view.show_message("Ошибка", "Название типа использования не может быть пустым")
+                return False
+            
+            # Проверяем наличие таблицы usage_types
+            try:
+                cursor = self.db.conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='usage_types'")
+                if not cursor.fetchone():
+                    logger.warning("Таблица usage_types не существует. Создаем таблицу...")
+                    cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS usage_types (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            code TEXT NOT NULL UNIQUE,
+                            name TEXT NOT NULL,
+                            description TEXT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    ''')
+                    self.db.conn.commit()
+                    logger.info("Таблица usage_types успешно создана")
+            except Exception as e:
+                logger.error(f"Ошибка при проверке/создании таблицы usage_types: {str(e)}")
+            
+            # Вызываем метод базы данных для добавления типа использования
+            usage_type_id = self.db.add_usage_type(code, name, description)
+            
+            if usage_type_id > 0:
+                logger.info(f"Тип использования кодов маркировки успешно добавлен: ID={usage_type_id}")
+                
+                # Обновляем таблицу типов использования в представлении
+                self.load_usage_types()
+                
+                self.view.show_message("Успех", f"Тип использования '{name}' успешно добавлен")
+                return True
+            else:
+                logger.error("Ошибка при добавлении типа использования")
+                self.view.show_message("Ошибка", "Не удалось добавить тип использования")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении типа использования: {str(e)}")
+            self.view.show_message("Ошибка", f"Не удалось добавить тип использования: {str(e)}")
+            return False
+    
+    def update_usage_type(self, usage_type_id, code, name, description=None):
+        """Обновление типа использования кодов маркировки"""
+        try:
+            # Обновляем тип использования в базе данных
+            if self.db.update_usage_type(usage_type_id, code, name, description):
+                logger.info(f"Обновлен тип использования кодов маркировки: {name} ({code})")
+                self.view.show_message("Успех", "Тип использования успешно обновлен")
+                return True
+            else:
+                logger.error(f"Ошибка при обновлении типа использования кодов маркировки: {name} ({code})")
+                self.view.show_message("Ошибка", "Не удалось обновить тип использования")
+                return False
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении типа использования кодов маркировки: {str(e)}")
+            self.view.show_message("Ошибка", f"Не удалось обновить тип использования: {str(e)}")
+            return False
+    
+    def delete_usage_type(self, usage_type_id):
+        """Удаление типа использования кодов маркировки"""
+        try:
+            # Удаляем тип использования из базы данных
+            if self.db.delete_usage_type(usage_type_id):
+                logger.info(f"Удален тип использования кодов маркировки с ID: {usage_type_id}")
+                self.view.show_message("Успех", "Тип использования успешно удален")
+                return True
+            else:
+                logger.error(f"Ошибка при удалении типа использования кодов маркировки с ID: {usage_type_id}")
+                self.view.show_message("Ошибка", "Не удалось удалить тип использования")
+                return False
+        except Exception as e:
+            logger.error(f"Ошибка при удалении типа использования кодов маркировки: {str(e)}")
+            self.view.show_message("Ошибка", f"Не удалось удалить тип использования: {str(e)}")
+            return False
+
+    def load_api_orders(self, *args):
+        """Загрузка API заказов с сервера"""
+        try:
+            logger.info("Загрузка API заказов с сервера")
+            
+            # Проверяем соединение с API
+            if not self.check_api_availability():
+                logger.warning("API недоступен, используем локальные данные")
+                # Загружаем данные из базы
+                self.load_api_orders_from_db()
+                return
+            
+            # Получаем заказы через API-клиент
+            response = self.api_client.get_orders()
+            
+            if response and 'data' in response and isinstance(response['data'], list):
+                try:
+                    # Преобразуем данные в объекты APIOrder
+                    api_orders = []
+                    
+                    for order_data in response['data']:
+                        try:
+                            order = APIOrder(
+                                order_id=order_data.get('orderId', ''),
+                                order_status=order_data.get('orderStatus', ''),
+                                created_timestamp=order_data.get('createdTimestamp', ''),
+                                total_quantity=order_data.get('totalQuantity', 0),
+                                num_of_products=order_data.get('numOfProducts', 0),
+                                product_group_type=order_data.get('productGroupType', ''),
+                                signed=order_data.get('signed', False),
+                                verified=order_data.get('verified', False),
+                                buffers=order_data.get('buffers', [])
+                            )
+                            api_orders.append(order)
+                        except Exception as e:
+                            logger.error(f"Ошибка при преобразовании данных заказа: {str(e)}")
+                    
+                    # Сохраняем заказы в базу данных
+                    saved_orders = self.db.save_api_orders(api_orders)
+                    
+                    # Обновляем представление
+                    self.view.update_api_orders_table(saved_orders)
+                    
+                    logger.info(f"Загружено {len(saved_orders)} API заказов")
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка при обработке API заказов: {str(e)}")
+                    self.view.show_message("Ошибка", f"Ошибка при обработке API заказов: {str(e)}")
+            else:
+                logger.warning("Некорректный формат ответа от API")
+                self.view.show_message("Ошибка", "Некорректный формат ответа от API")
+                
+                # Загружаем данные из базы как запасной вариант
+                self.load_api_orders_from_db()
+        
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке API заказов: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при загрузке API заказов: {str(e)}")
+            
+            # Загружаем данные из базы как запасной вариант
+            self.load_api_orders_from_db()
+    
+    def check_api_availability(self):
+        """Проверка доступности API"""
+        try:
+            # Проверяем активное подключение
+            active_connection = self.db.get_active_connection()
+            if not active_connection:
+                logger.warning("Отсутствует активное подключение")
+                return False
+            
+            # Пытаемся выполнить простой запрос для проверки соединения
+            response = self.api_client.ping()
+            
+            # Если получен ответ с кодом 200, API доступен
+            return response is not None and response.get('success', False)
+            
+        except Exception as e:
+            logger.error(f"Ошибка при проверке доступности API: {str(e)}")
+            return False

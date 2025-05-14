@@ -68,6 +68,9 @@ def main():
         # Создание контроллера с передачей логгера API
         controller = MainController(view, db, api_client, api_logger)
         
+        # Устанавливаем ссылку на контроллер в главном окне
+        view.controller = controller
+        
         # Подключение сигнала завершения к методу сохранения данных
         app_manager.aboutToQuit.connect(controller.save_all_data)
         

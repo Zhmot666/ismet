@@ -28,7 +28,7 @@ class APIClient:
             "GET:/api/v2/pharma/report": "Получение отчета СУЗ",
             "POST:/api/v2/pharma/orders": "Отправка заказа на эмиссию КМ",
             "POST:/api/v2/pharma/aggregation": "Отправка данных агрегации",
-            "POST:/api/v2/pharma/utilisation": "Отправка данных об использовании КМ",
+            "POST:/api/v2/pharma/utilisation": "Отправка отчета о нанесении кодов маркировки",
             
             # Молочная продукция
             "GET:/api/v2/milk/ping": "Проверка доступности СУЗ (молочная продукция)",
@@ -39,7 +39,7 @@ class APIClient:
             "GET:/api/v2/milk/report": "Получение отчета СУЗ (молочная продукция)",
             "POST:/api/v2/milk/orders": "Отправка заказа на эмиссию КМ (молочная продукция)",
             "POST:/api/v2/milk/aggregation": "Отправка данных агрегации (молочная продукция)",
-            "POST:/api/v2/milk/utilisation": "Отправка данных об использовании КМ (молочная продукция)",
+            "POST:/api/v2/milk/utilisation": "Отправка отчета о нанесении кодов маркировки (молочная продукция)",
             
             # Табачная продукция
             "GET:/api/v2/tobacco/ping": "Проверка доступности СУЗ (табачная продукция)",
@@ -50,7 +50,7 @@ class APIClient:
             "GET:/api/v2/tobacco/report": "Получение отчета СУЗ (табачная продукция)",
             "POST:/api/v2/tobacco/orders": "Отправка заказа на эмиссию КМ (табачная продукция)",
             "POST:/api/v2/tobacco/aggregation": "Отправка данных агрегации (табачная продукция)",
-            "POST:/api/v2/tobacco/utilisation": "Отправка данных об использовании КМ (табачная продукция)",
+            "POST:/api/v2/tobacco/utilisation": "Отправка отчета о нанесении кодов маркировки (табачная продукция)",
             
             # Обувные товары
             "GET:/api/v2/shoes/ping": "Проверка доступности СУЗ (обувь)",
@@ -61,7 +61,7 @@ class APIClient:
             "GET:/api/v2/shoes/report": "Получение отчета СУЗ (обувь)",
             "POST:/api/v2/shoes/orders": "Отправка заказа на эмиссию КМ (обувь)",
             "POST:/api/v2/shoes/aggregation": "Отправка данных агрегации (обувь)",
-            "POST:/api/v2/shoes/utilisation": "Отправка данных об использовании КМ (обувь)",
+            "POST:/api/v2/shoes/utilisation": "Отправка отчета о нанесении кодов маркировки (обувь)",
             
             # Алкогольная продукция
             "GET:/api/v2/alcohol/ping": "Проверка доступности СУЗ (алкоголь)",
@@ -72,7 +72,7 @@ class APIClient:
             "GET:/api/v2/alcohol/report": "Получение отчета СУЗ (алкоголь)",
             "POST:/api/v2/alcohol/orders": "Отправка заказа на эмиссию КМ (алкоголь)",
             "POST:/api/v2/alcohol/aggregation": "Отправка данных агрегации (алкоголь)",
-            "POST:/api/v2/alcohol/utilisation": "Отправка данных об использовании КМ (алкоголь)",
+            "POST:/api/v2/alcohol/utilisation": "Отправка отчета о нанесении кодов маркировки (алкоголь)",
             
             # Товары легкой промышленности
             "GET:/api/v2/lp/ping": "Проверка доступности СУЗ (легпром)",
@@ -83,7 +83,7 @@ class APIClient:
             "GET:/api/v2/lp/report": "Получение отчета СУЗ (легпром)",
             "POST:/api/v2/lp/orders": "Отправка заказа на эмиссию КМ (легпром)",
             "POST:/api/v2/lp/aggregation": "Отправка данных агрегации (легпром)",
-            "POST:/api/v2/lp/utilisation": "Отправка данных об использовании КМ (легпром)",
+            "POST:/api/v2/lp/utilisation": "Отправка отчета о нанесении кодов маркировки (легпром)",
             
             # Питьевая вода
             "GET:/api/v2/water/ping": "Проверка доступности СУЗ (вода)",
@@ -94,7 +94,7 @@ class APIClient:
             "GET:/api/v2/water/report": "Получение отчета СУЗ (вода)",
             "POST:/api/v2/water/orders": "Отправка заказа на эмиссию КМ (вода)",
             "POST:/api/v2/water/aggregation": "Отправка данных агрегации (вода)",
-            "POST:/api/v2/water/utilisation": "Отправка данных об использовании КМ (вода)",
+            "POST:/api/v2/water/utilisation": "Отправка отчета о нанесении кодов маркировки (вода)",
             
             # URL с параметрами для фармацевтики
             "GET:/api/v2/pharma/orders?omsId=": "Получение списка заказов по omsId (фарма)",
@@ -494,12 +494,181 @@ class APIClient:
         return response.json()
     
     def post_utilisation(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Отправка данных об использовании"""
-        url = f"{self.base_url}/api/v2/{self.extension}/utilisation"
+        """Отправка данных об использовании (нанесении) КМ
+        
+        Формирует и отправляет запрос следующего вида:
+        {
+            "products": [
+                {
+                    "gtin": "04810155003995",
+                    "quantity": 3000,
+                    "serialNumberType": "OPERATOR",
+                    "templateId": 5
+                }
+            ],
+            "factoryId": "4810155900003",
+            "releaseMethodType": "IMPORT",
+            "factoryCountry": "BY"
+        }
+        
+        Или для прямого использования кодов (отчет о нанесении):
+        {
+            "sntins": ["код1", "код2", ...],
+            "expirationDate": "2025-12-31",
+            "seriesNumber": "001",
+            "usageType": "PRINTED"
+        }
+        
+        Важно: omsId должен передаваться в URL-строке запроса, а не в теле запроса.
+        
+        Args:
+            data (Dict[str, Any]): Данные отчета, включающие информацию о продуктах
+                                  или кодах маркировки для отчета о нанесении.
+                                  
+        Returns:
+            Dict[str, Any]: Результат отправки отчета о нанесении КМ
+            
+        Raises:
+            ValueError: Если данные не соответствуют требованиям API
+            requests.RequestException: Если возникла ошибка при отправке запроса
+        """
+        # Проверяем наличие токена
         headers = self.get_headers()
-        response = self.session.post(url, json=data, headers=headers)
-        self.log_request("POST", url, data, response)
-        return response.json()
+        if not headers.get('clientToken'):
+            error_msg = "Отсутствует токен аутентификации (clientToken). Необходимо настроить учетные данные."
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+            
+        # Проверяем наличие omsId в данных или в настройках клиента
+        omsId = data.get('omsId', self.omsid)
+        if not omsId:
+            error_msg = "Отсутствует идентификатор СУЗ (omsId). Необходимо указать omsId в запросе или в настройках API-клиента."
+            logger.error(error_msg)
+            # Не прерываем выполнение, возможно API все равно примет запрос
+            logger.warning("Продолжаем отправку запроса без omsId")
+        
+        # Создаем копию данных, чтобы не изменять оригинальные данные
+        data_copy = data.copy()
+        
+        # Удаляем omsId из тела запроса, если он там есть
+        if 'omsId' in data_copy:
+            del data_copy['omsId']
+            logger.info("omsId удален из тела запроса и будет передан в URL-строке")
+        
+        # URL для отправки данных об использовании КМ с omsId в URL-строке
+        url = f"{self.base_url}/api/v2/{self.extension}/utilisation?omsId={omsId}"
+        
+        # Логируем информацию о запросе
+        logger.info(f"Отправка отчета о нанесении. URL: {url}")
+        
+        # Для заказов используем Content-Type: application/json
+        headers['Content-Type'] = 'application/json;charset=UTF-8'
+        
+        # Проверка обязательных полей для отчета о нанесении
+        if "sntins" in data_copy:
+            required_fields = ["expirationDate", "seriesNumber", "usageType"]
+            missing_fields = [field for field in required_fields if field not in data_copy]
+            if missing_fields:
+                error_msg = f"Отсутствуют обязательные поля для отчета о нанесении: {', '.join(missing_fields)}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            
+            # Проверка формата даты
+            try:
+                import datetime
+                datetime.datetime.strptime(data_copy["expirationDate"], "%Y-%m-%d")
+            except ValueError:
+                error_msg = "Поле expirationDate должно быть в формате YYYY-MM-DD"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            
+            # Проверка допустимых значений типа использования
+            allowed_usage_types = ["PRINTED", "VERIFIED"]
+            if data_copy["usageType"] not in allowed_usage_types:
+                error_msg = f"Недопустимое значение типа использования: {data_copy['usageType']}. Допустимые значения: {', '.join(allowed_usage_types)}"
+                logger.error(error_msg)
+                # Автоматически исправляем на допустимое значение
+                logger.warning(f"Автоматическая замена типа использования на {allowed_usage_types[0]}")
+                data_copy["usageType"] = allowed_usage_types[0]
+            
+            # Логирование дополнительных полей
+            logger.info(f"Отчет о нанесении: {len(data_copy['sntins'])} кодов")
+            logger.info(f"Срок годности: {data_copy['expirationDate']}")
+            logger.info(f"Номер серии: {data_copy['seriesNumber']}")
+            logger.info(f"Тип использования: {data_copy['usageType']}")
+            
+            if data_copy['sntins'] and len(data_copy['sntins']) > 0:
+                logger.info(f"Пример кода: {data_copy['sntins'][0]}")
+        elif "products" in data_copy:
+            logger.info(f"Отчет о нанесении: {len(data_copy['products'])} продуктов")
+            for product in data_copy['products']:
+                logger.info(f"- GTIN: {product.get('gtin', 'не указан')}, Количество: {product.get('quantity', 0)}")
+        
+        try:
+            # Логируем запрос для отладки
+            logger.debug(f"Отправляемые данные: {data_copy}")
+            
+            # Отправляем запрос с обновленными данными (без omsId в теле)
+            response = self.session.post(url, json=data_copy, headers=headers)
+            
+            # Логируем ответ для отладки
+            logger.info(f"Получен ответ от сервера. Статус: {response.status_code}")
+            if response.content:
+                try:
+                    response_data = response.json()
+                    logger.info(f"Тело ответа: {response_data}")
+                    
+                    # Логирование ошибок валидации полей
+                    if "fieldErrors" in response_data:
+                        for field_error in response_data["fieldErrors"]:
+                            logger.error(f"Ошибка валидации поля '{field_error.get('fieldName')}': {field_error.get('fieldError')}")
+                            
+                except Exception:
+                    logger.info(f"Тело ответа не является JSON: {response.text[:200]}")
+            
+            # Логируем запрос в БД с более информативным описанием
+            description = "Отправка отчета о нанесении кодов маркировки"
+            self.log_request("POST", url, data_copy, response, description)
+            
+            # Проверяем наличие ошибок в ответе
+            json_response = response.json()
+            if not response.ok or not json_response.get("success", False):
+                error_message = "Ошибка при отправке отчета о нанесении: "
+                if "fieldErrors" in json_response:
+                    field_errors = []
+                    for field_error in json_response["fieldErrors"]:
+                        field_errors.append(f"{field_error.get('fieldName')}: {field_error.get('fieldError')}")
+                    error_message += ", ".join(field_errors)
+                elif "globalErrors" in json_response:
+                    error_message += ", ".join(json_response["globalErrors"])
+                elif "error" in json_response:
+                    if isinstance(json_response["error"], dict):
+                        error_message += json_response["error"].get("message", "Неизвестная ошибка")
+                    else:
+                        error_message += str(json_response["error"])
+                else:
+                    error_message += f"Код ответа {response.status_code}"
+                
+                logger.warning(error_message)
+            else:
+                logger.info("Отчет о нанесении успешно отправлен")
+            
+            return json_response
+            
+        except requests.RequestException as e:
+            error_message = f"Ошибка соединения при отправке отчета о нанесении: {str(e)}"
+            logger.error(error_message)
+            # Логируем ошибку в БД
+            if hasattr(self, 'db') and self.db:
+                error_data = {"error": str(e)}
+                error_response = type('obj', (object,), {
+                    'status_code': 0,
+                    'content': b'',
+                    'json': lambda: error_data,
+                    'request': type('obj', (object,), {'headers': {}})
+                })
+                self.log_request("POST", url, data_copy, error_response, "Ошибка отправки отчета о нанесении")
+            return {"success": False, "error": str(e)}
     
     def create_order(self, order_data: Dict[str, Any]) -> Dict[str, Any]:
         """Создание заказа на эмиссию кодов маркировки

@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBo
                          QLineEdit, QPushButton, QLabel, QMessageBox, QHeaderView,
                          QCheckBox, QGroupBox, QSpinBox, QDateEdit, QFileDialog, QMenu,
                          QDialog, QDialogButtonBox, QSplitter, QTextEdit, QInputDialog)
-from PyQt6.QtCore import Qt, QDate, pyqtSignal, QPoint
+from PyQt6.QtCore import Qt, QDate, pyqtSignal, QPoint, QDateTime, QTimer
 from PyQt6.QtGui import QAction, QCursor, QColor, QIntValidator
 
 from views.dialogs import EmissionOrderDialog, DisplayCodesDialog
@@ -13,6 +13,9 @@ import datetime
 import json
 from models.models import Extension, Nomenclature, EmissionType, Country
 from typing import List
+import os
+import sys
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +78,22 @@ class MainWindow(QMainWindow):
     edit_order_status_signal = pyqtSignal(int, str, str, str)  # id, code, name, description
     delete_order_status_signal = pyqtSignal(int)
     
+    # Сигналы для работы с типами использования кодов маркировки
+    load_usage_types_signal = pyqtSignal()  # Сигнал для загрузки типов использования
+    add_usage_type_signal = pyqtSignal(str, str, str)  # code, name, description
+    edit_usage_type_signal = pyqtSignal(int, str, str, str)  # id, code, name, description
+    delete_usage_type_signal = pyqtSignal(int)  # id
+    
     # Сигналы для работы с кодами маркировки
     mark_codes_as_used_signal = pyqtSignal(list)  # code_ids
     mark_codes_as_exported_signal = pyqtSignal(list)  # code_ids
+    
+    # Сигналы для работы с файлами агрегации
+    load_aggregation_files_signal = pyqtSignal()  # Сигнал для загрузки файлов агрегации
+    add_aggregation_file_signal = pyqtSignal(str, dict, str)  # filename, data, comment
+    delete_aggregation_file_signal = pyqtSignal(int)  # file_id
+    export_aggregation_file_signal = pyqtSignal(int, str)  # file_id, export_path
+    send_utilisation_report_signal = pyqtSignal(dict)  # data
     
     def __init__(self):
         super().__init__()
@@ -101,13 +117,15 @@ class MainWindow(QMainWindow):
         self.create_api_logs_tab()
         self.create_countries_tab()
         self.create_order_statuses_tab()
-        self.create_marking_codes_tab()  # Добавляем новую вкладку
+        self.create_marking_codes_tab()
+        self.create_aggregation_files_tab()  # Добавляем новую вкладку
         
         # Добавляем вкладки в виджет (только те, которые должны быть видны)
         self.tabs.addTab(self.orders_tab, "Заказы")
         self.tabs.addTab(self.api_orders_tab, "API Заказы")
         self.tabs.addTab(self.api_logs_tab, "Логи API")
-        self.tabs.addTab(self.marking_codes_tab, "Коды маркировки")  # Добавляем новую вкладку
+        self.tabs.addTab(self.marking_codes_tab, "Коды маркировки")
+        self.tabs.addTab(self.aggregation_files_tab, "Файлы агрегации")  # Добавляем новую вкладку
         
         # Создаем панель кнопок для вызова модальных окон
         toolbar = self.addToolBar("Панель инструментов")
@@ -136,6 +154,8 @@ class MainWindow(QMainWindow):
             self.load_api_logs_signal.emit()
         elif index == 3:  # Коды маркировки
             self.on_apply_marking_codes_filter()
+        elif index == 4:  # Файлы агрегации
+            self.load_aggregation_files_signal.emit()
     
     def create_status_bar(self):
         """Создание строки статуса с индикатором доступности API"""
@@ -185,6 +205,45 @@ class MainWindow(QMainWindow):
         self.api_logs_tab = QWidget()
         layout = QVBoxLayout(self.api_logs_tab)
         
+        # Добавляем фильтры сверху
+        filters_layout = QHBoxLayout()
+        
+        # Фильтр по HTTP-методам (GET, POST, PUT, DELETE)
+        http_method_label = QLabel("HTTP-метод:")
+        self.http_method_filter = QComboBox()
+        self.http_method_filter.addItem("Все", "")
+        self.http_method_filter.addItem("GET", "GET")
+        self.http_method_filter.addItem("POST", "POST")
+        self.http_method_filter.addItem("PUT", "PUT")
+        self.http_method_filter.addItem("DELETE", "DELETE")
+        filters_layout.addWidget(http_method_label)
+        filters_layout.addWidget(self.http_method_filter)
+        
+        # Фильтр по API методам (ping, codes, utilisation и т.д.)
+        api_method_label = QLabel("API метод:")
+        self.api_method_filter = QComboBox()
+        self.api_method_filter.addItem("Все", "")
+        # Добавляем часто используемые методы API
+        api_methods = ["ping", "codes", "utilisation", "orders", "aggregation", "report", "version"]
+        for method in api_methods:
+            self.api_method_filter.addItem(method, method)
+        self.api_method_filter.setEditable(True)  # Позволяем вводить свои значения
+        filters_layout.addWidget(api_method_label)
+        filters_layout.addWidget(self.api_method_filter)
+        
+        # Кнопка применения фильтров
+        apply_filters_button = QPushButton("Применить фильтры")
+        apply_filters_button.clicked.connect(self.apply_api_logs_filters)
+        filters_layout.addWidget(apply_filters_button)
+        
+        # Кнопка сброса фильтров
+        reset_filters_button = QPushButton("Сбросить фильтры")
+        reset_filters_button.clicked.connect(self.reset_api_logs_filters)
+        filters_layout.addWidget(reset_filters_button)
+        
+        # Добавляем слой с фильтрами в основной слой
+        layout.addLayout(filters_layout)
+        
         # Создаем два виджета - для таблицы логов и просмотра деталей
         splitter = QSplitter(Qt.Orientation.Vertical)
         logs_widget = QWidget()
@@ -204,7 +263,7 @@ class MainWindow(QMainWindow):
         buttons_layout = QHBoxLayout()
         
         refresh_button = QPushButton("Обновить логи")
-        refresh_button.clicked.connect(self.load_api_logs_signal.emit)
+        refresh_button.clicked.connect(self.on_refresh_api_logs)
         buttons_layout.addWidget(refresh_button)
         
         export_descriptions_button = QPushButton("Экспорт описаний API")
@@ -231,6 +290,62 @@ class MainWindow(QMainWindow):
         
         # Добавляем сплиттер в макет вкладки
         layout.addWidget(splitter)
+        
+        # Храним полный список логов для фильтрации
+        self.all_api_logs = []
+    
+    def on_refresh_api_logs(self):
+        """Обработчик нажатия кнопки обновления логов API"""
+        # Сбрасываем фильтры перед обновлением
+        self.http_method_filter.setCurrentIndex(0)
+        self.api_method_filter.setCurrentIndex(0)
+        
+        # Загружаем логи API
+        self.load_api_logs_signal.emit()
+    
+    def apply_api_logs_filters(self):
+        """Применение фильтров к таблице логов API"""
+        if not hasattr(self, 'all_api_logs') or not self.all_api_logs:
+            return
+        
+        # Получаем значения фильтров
+        http_method = self.http_method_filter.currentData()
+        api_method = self.api_method_filter.currentText().strip().lower()
+        
+        # Применяем фильтры
+        filtered_logs = []
+        for log in self.all_api_logs:
+            # Фильтр по HTTP-методу
+            if http_method and log["method"] != http_method:
+                continue
+                
+            # Фильтр по API методу (проверяем наличие в URL)
+            if api_method and api_method not in log["url"].lower():
+                continue
+                
+            # Если прошли все фильтры, добавляем лог в отфильтрованный список
+            filtered_logs.append(log)
+        
+        # Обновляем таблицу с отфильтрованными логами
+        self._update_api_logs_table_with_data(filtered_logs)
+        
+        # Обновляем заголовок вкладки с количеством отображаемых логов
+        tab_index = self.tabs.indexOf(self.api_logs_tab)
+        if tab_index >= 0:
+            self.tabs.setTabText(tab_index, f"Логи API ({len(filtered_logs)})")
+    
+    def reset_api_logs_filters(self):
+        """Сброс фильтров логов API"""
+        self.http_method_filter.setCurrentIndex(0)
+        self.api_method_filter.setCurrentIndex(0)
+        
+        # Обновляем таблицу с полным списком логов
+        self._update_api_logs_table_with_data(self.all_api_logs)
+        
+        # Обновляем заголовок вкладки
+        tab_index = self.tabs.indexOf(self.api_logs_tab)
+        if tab_index >= 0:
+            self.tabs.setTabText(tab_index, f"Логи API ({len(self.all_api_logs)})")
     
     def on_api_log_selected(self):
         """Обработчик выбора лога API в таблице"""
@@ -289,6 +404,22 @@ class MainWindow(QMainWindow):
     
     def update_api_logs_table(self, logs):
         """Обновление таблицы логов API"""
+        # Сохраняем полный список логов для фильтрации
+        self.all_api_logs = logs
+        
+        # Обновляем таблицу
+        self._update_api_logs_table_with_data(logs)
+        
+        # Обновляем заголовок вкладки с количеством логов
+        tab_index = self.tabs.indexOf(self.api_logs_tab)
+        if tab_index >= 0:
+            self.tabs.setTabText(tab_index, f"Логи API ({len(logs)})")
+            
+        # Обновляем список API методов в фильтре на основе загруженных логов
+        self.update_api_method_filter_items(logs)
+    
+    def _update_api_logs_table_with_data(self, logs):
+        """Обновление таблицы логов API конкретными данными"""
         # Настраиваем таблицу для хранения всех данных
         self.api_logs_table.setColumnCount(9)
         self.api_logs_table.setHorizontalHeaderLabels(["ID", "Метод", "URL", "Код", "Успех", "Время", "Описание", "request_data", "response_data"])
@@ -324,6 +455,97 @@ class MainWindow(QMainWindow):
         
         # Подгоняем размеры колонок
         self.api_logs_table.resizeColumnsToContents()
+    
+    def update_api_method_filter_items(self, logs):
+        """Обновляет список доступных API методов на основе загруженных логов"""
+        # Сохраняем текущий выбранный элемент
+        current_text = self.api_method_filter.currentText()
+        
+        # Получаем уникальные API методы из логов
+        api_methods = set()
+        
+        # Известные API методы, которые можно встретить в URL
+        known_api_methods = [
+            "ping", "codes", "utilisation", "orders", "aggregation", "report", "version", 
+            "status", "buffers", "emission", "authentication", "token", "certificates", 
+            "nomenclature", "registration", "documents", "quota", "pool"
+        ]
+        
+        for log in logs:
+            # Извлекаем из URL имя метода API
+            url = log["url"].lower()
+            
+            # Создаем более продвинутый алгоритм извлечения метода API из URL
+            # Сначала проверяем, есть ли в URL путь /api/v*/ для определения API запросов
+            if "/api/v" in url:
+                # Разбиваем URL на части и анализируем
+                parts = url.split('/')
+                for i, part in enumerate(parts):
+                    # Пропускаем пустые строки и общие элементы URL
+                    if not part or part in ["api", "v1", "v2", "v3", "pharma", "tobacco", "shoes"]:
+                        continue
+                    
+                    # Проверяем, есть ли часть в списке известных методов API
+                    if part in known_api_methods:
+                        api_methods.add(part)
+                    # Проверяем на наличие параметров (часть может содержать ? или &)
+                    elif "?" in part:
+                        clean_part = part.split("?")[0]
+                        if clean_part and clean_part in known_api_methods:
+                            api_methods.add(clean_part)
+                    # Если часть содержит цифры, это может быть ID ресурса, проверяем предыдущую часть
+                    elif part.isdigit() and i > 0 and parts[i-1] in known_api_methods:
+                        api_methods.add(parts[i-1])
+            
+            # Проверяем URL по описанию лога, если там указан метод API
+            description = log.get("description", "").lower()
+            for method in known_api_methods:
+                if method in description:
+                    api_methods.add(method)
+        
+        # Если методы не были найдены по URL, используем анализ описаний логов
+        if not api_methods:
+            for log in logs:
+                description = log.get("description", "").lower()
+                
+                # Часто в описании указывается действие, например "Получение статуса заказов"
+                action_mapping = {
+                    "получение заказов": "orders",
+                    "получение статуса заказов": "status",
+                    "проверка доступности": "ping",
+                    "получение кодов": "codes",
+                    "отчет о нанесении": "utilisation",
+                    "получение агрегации": "aggregation",
+                    "получение отчета": "report",
+                    "получение версии": "version",
+                    "эмиссия": "emission",
+                    "аутентификация": "authentication",
+                    "регистрация": "registration"
+                }
+                
+                for action, method in action_mapping.items():
+                    if action in description:
+                        api_methods.add(method)
+        
+        # Очищаем список методов и добавляем "Все"
+        self.api_method_filter.clear()
+        self.api_method_filter.addItem("Все", "")
+        
+        # Добавляем найденные методы
+        for method in sorted(api_methods):
+            self.api_method_filter.addItem(method, method)
+        
+        # Если методы вообще не обнаружены, добавляем стандартный набор
+        if not api_methods:
+            for method in ["ping", "codes", "utilisation", "orders", "aggregation", "report", "version"]:
+                self.api_method_filter.addItem(method, method)
+        
+        # Восстанавливаем выбранный элемент, если он есть в списке
+        index = self.api_method_filter.findText(current_text)
+        if index >= 0:
+            self.api_method_filter.setCurrentIndex(index)
+        else:
+            self.api_method_filter.setCurrentIndex(0)  # Устанавливаем "Все"
     
     def create_extensions_tab(self):
         """Создание вкладки расширений API"""
@@ -1605,6 +1827,218 @@ class MainWindow(QMainWindow):
         else:
             self.tabs.setTabText(self.tabs.indexOf(self.marking_codes_tab), "Коды маркировки")
 
+    def create_aggregation_files_tab(self):
+        """Создание вкладки для работы с файлами агрегации"""
+        self.aggregation_files_tab = QWidget()
+        layout = QVBoxLayout(self.aggregation_files_tab)
+        
+        # Создаем таблицу для отображения файлов агрегации
+        self.aggregation_files_table = QTableWidget()
+        self.aggregation_files_table.setColumnCount(6)
+        self.aggregation_files_table.setHorizontalHeaderLabels([
+            "Имя файла", "Продукция", "Коды маркировки", "Коды агрегации 1 уровня", 
+            "Коды агрегации 2 уровня", "Комментарий"
+        ])
+        self.aggregation_files_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.aggregation_files_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.aggregation_files_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.aggregation_files_table.customContextMenuRequested.connect(self.show_aggregation_file_context_menu)
+        
+        layout.addWidget(self.aggregation_files_table)
+        
+        # Создаем панель с кнопками
+        button_layout = QHBoxLayout()
+        
+        # Кнопка для загрузки файла
+        load_file_button = QPushButton("Загрузить файл")
+        load_file_button.clicked.connect(self.on_load_aggregation_file)
+        button_layout.addWidget(load_file_button)
+        
+        # Кнопка для отправки отчета о нанесении
+        send_utilisation_report_button = QPushButton("Отчет о нанесении")
+        send_utilisation_report_button.clicked.connect(self.on_send_utilisation_report)
+        button_layout.addWidget(send_utilisation_report_button)
+        
+        # Кнопка для обновления списка файлов
+        refresh_button = QPushButton("Обновить")
+        refresh_button.clicked.connect(self.load_aggregation_files_signal.emit)
+        button_layout.addWidget(refresh_button)
+        
+        layout.addLayout(button_layout)
+
+    def on_send_utilisation_report(self):
+        """Обработчик нажатия на кнопку 'Отчет о нанесении'"""
+        # Проверяем, что выбрана строка в таблице файлов агрегации
+        if not self.aggregation_files_table.selectedItems():
+            QMessageBox.warning(
+                self,
+                "Предупреждение",
+                "Необходимо выбрать файл агрегации для формирования отчета о нанесении."
+            )
+            return
+        
+        # Получаем ID выбранного файла
+        row = self.aggregation_files_table.selectedItems()[0].row()
+        file_id = int(self.aggregation_files_table.item(row, 0).data(Qt.ItemDataRole.UserRole))
+        
+        # Создаем диалог для предварительного просмотра и редактирования отчета
+        # Передаем контроллер явно в качестве дополнительного параметра
+        dialog = UtilisationReportDialog(file_id, self, self.controller)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            # Получаем данные отчета из диалога
+            report_data = dialog.get_report_data()
+            
+            # Отправляем сигнал на отправку отчета
+            self.send_utilisation_report_signal.emit(report_data)
+
+    def show_aggregation_file_context_menu(self, position):
+        """Отображение контекстного меню для таблицы файлов агрегации"""
+        menu = QMenu()
+        export_action = menu.addAction("Выгрузить JSON")
+        utilisation_action = menu.addAction("Отчет о нанесении")
+        delete_action = menu.addAction("Удалить")
+        
+        # Проверяем, что выбрана строка
+        if not self.aggregation_files_table.selectedItems():
+            export_action.setEnabled(False)
+            utilisation_action.setEnabled(False)
+            delete_action.setEnabled(False)
+        
+        action = menu.exec(self.aggregation_files_table.mapToGlobal(position))
+        
+        if not self.aggregation_files_table.selectedItems():
+            return
+        
+        # Получаем ID выбранного файла (хранится в теге)
+        row = self.aggregation_files_table.selectedItems()[0].row()
+        file_id = int(self.aggregation_files_table.item(row, 0).data(Qt.ItemDataRole.UserRole))
+        
+        if action == export_action:
+            # Открываем диалог выбора пути для сохранения файла
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Выгрузить JSON-файл",
+                f"{self.aggregation_files_table.item(row, 0).text()}.json",
+                "JSON файлы (*.json)"
+            )
+            
+            if file_path:
+                # Отправляем сигнал на выгрузку файла
+                self.export_aggregation_file_signal.emit(file_id, file_path)
+        
+        elif action == utilisation_action:
+            # Открываем диалог для создания отчета о нанесении
+            self.on_send_utilisation_report()
+        
+        elif action == delete_action:
+            # Запрашиваем подтверждение
+            if QMessageBox.question(
+                self,
+                "Подтверждение удаления",
+                f"Вы действительно хотите удалить файл агрегации?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            ) == QMessageBox.StandardButton.Yes:
+                # Отправляем сигнал на удаление файла
+                self.delete_aggregation_file_signal.emit(file_id)
+
+    def on_load_aggregation_file(self):
+        """Обработчик нажатия на кнопку 'Загрузить файл'"""
+        # Открываем диалог выбора файла
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите файл агрегации",
+            "",
+            "JSON файлы (*.json)"
+        )
+        
+        if file_path:
+            # Запрашиваем комментарий
+            comment, ok = QInputDialog.getText(
+                self,
+                "Комментарий",
+                "Введите комментарий к файлу:"
+            )
+            
+            if ok:  # Пользователь нажал OK
+                try:
+                    # Получаем имя файла из пути
+                    filename = os.path.basename(file_path)
+                    
+                    # Читаем данные из JSON-файла
+                    with open(file_path, 'r', encoding='utf-8') as file:
+                        json_text = file.read()
+                    data = json.loads(json_text)
+                    
+                    # Логирование для отладки
+                    logging.info(f"Загружен файл: {filename}")
+                    logging.info(f"Содержимое файла: {json_text[:100]}...")  # Логируем первые 100 символов
+                    
+                    # Отправляем сигнал на добавление файла
+                    self.add_aggregation_file_signal.emit(filename, data, comment)
+                    
+                except json.JSONDecodeError as e:
+                    QMessageBox.critical(
+                        self,
+                        "Ошибка",
+                        f"Ошибка при разборе JSON-файла: {str(e)}"
+                    )
+                except Exception as e:
+                    QMessageBox.critical(
+                        self,
+                        "Ошибка",
+                        f"Ошибка при чтении файла: {str(e)}"
+                    )
+
+    def update_aggregation_files_table(self, files):
+        """Обновление таблицы файлов агрегации
+        
+        Args:
+            files (List[AggregationFile]): Список объектов файлов агрегации
+        """
+        # Логирование для отладки
+        logging.info(f"Обновление таблицы файлов агрегации. Получено {len(files)} файлов.")
+        
+        self.aggregation_files_table.setRowCount(0)  # Очищаем таблицу
+        
+        for file in files:
+            # Логирование информации о файле
+            logging.info(f"Добавление файла в таблицу: {file.filename}")
+            logging.info(f"Продукция: {file.product}")
+            logging.info(f"Кол-во кодов маркировки: {len(file.marking_codes)}")
+            logging.info(f"Кол-во кодов агрегации 1 уровня: {len(file.level1_codes)}")
+            logging.info(f"Кол-во кодов агрегации 2 уровня: {len(file.level2_codes)}")
+            
+            row = self.aggregation_files_table.rowCount()
+            self.aggregation_files_table.insertRow(row)
+            
+            # Имя файла
+            item = QTableWidgetItem(file.filename)
+            item.setData(Qt.ItemDataRole.UserRole, file.id)  # Сохраняем ID в теге
+            self.aggregation_files_table.setItem(row, 0, item)
+            
+            # Продукция
+            item = QTableWidgetItem(file.product)
+            self.aggregation_files_table.setItem(row, 1, item)
+            
+            # Коды маркировки
+            item = QTableWidgetItem(str(len(file.marking_codes)))
+            self.aggregation_files_table.setItem(row, 2, item)
+            
+            # Коды агрегации 1 уровня
+            item = QTableWidgetItem(str(len(file.level1_codes)))
+            self.aggregation_files_table.setItem(row, 3, item)
+            
+            # Коды агрегации 2 уровня
+            item = QTableWidgetItem(str(len(file.level2_codes)))
+            self.aggregation_files_table.setItem(row, 4, item)
+            
+            # Комментарий
+            item = QTableWidgetItem(file.comment)
+            self.aggregation_files_table.setItem(row, 5, item)
+        
+        # Подгоняем ширину колонок
+        self.aggregation_files_table.resizeColumnsToContents()
+
 class CatalogsDialog(QDialog):
     """Диалог для работы со справочниками"""
     def __init__(self, parent=None):
@@ -1637,12 +2071,14 @@ class CatalogsDialog(QDialog):
         self.create_extensions_tab()
         self.create_countries_tab()
         self.create_order_statuses_tab()
+        self.create_usage_types_tab()  # Новая вкладка для типов использования
         
         # Добавляем вкладки в виджет
         self.tabs.addTab(self.nomenclature_tab, "Номенклатура")
         self.tabs.addTab(self.extensions_tab, "Виды продукции")
         self.tabs.addTab(self.countries_tab, "Страны")
         self.tabs.addTab(self.order_statuses_tab, "Статусы заказов")
+        self.tabs.addTab(self.usage_types_tab, "Типы использования")  # Добавляем новую вкладку
         
         # Кнопки
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -1659,6 +2095,7 @@ class CatalogsDialog(QDialog):
         self.reload_extensions()
         self.reload_countries()
         self.reload_order_statuses()
+        self.reload_usage_types()  # Загружаем типы использования
         super().showEvent(event)
     
     def on_tab_changed(self, index):
@@ -1672,6 +2109,8 @@ class CatalogsDialog(QDialog):
             self.reload_countries()
         elif index == 3:  # Статусы заказов
             self.reload_order_statuses()
+        elif index == 4:  # Типы использования
+            self.reload_usage_types()
 
     def create_nomenclature_tab(self):
         """Создание вкладки номенклатуры"""
@@ -1955,6 +2394,199 @@ class CatalogsDialog(QDialog):
         else:
             QMessageBox.warning(self, "Ошибка", "Выберите статус заказа для удаления")
 
+    def create_usage_types_tab(self):
+        """Создание вкладки типов использования кодов маркировки"""
+        self.usage_types_tab = QWidget()
+        layout = QVBoxLayout(self.usage_types_tab)
+        
+        # Таблица типов использования
+        self.usage_types_table = QTableWidget()
+        self.usage_types_table.setColumnCount(4)
+        self.usage_types_table.setHorizontalHeaderLabels(["ID", "Код", "Название", "Описание"])
+        layout.addWidget(self.usage_types_table)
+        
+        # Кнопки управления
+        buttons_layout = QHBoxLayout()
+        
+        refresh_button = QPushButton("Обновить")
+        refresh_button.clicked.connect(self.reload_usage_types)
+        buttons_layout.addWidget(refresh_button)
+        
+        add_button = QPushButton("Добавить")
+        add_button.clicked.connect(self.on_add_usage_type_clicked)
+        buttons_layout.addWidget(add_button)
+        
+        edit_button = QPushButton("Изменить")
+        edit_button.clicked.connect(self.on_edit_usage_type_clicked)
+        buttons_layout.addWidget(edit_button)
+        
+        delete_button = QPushButton("Удалить")
+        delete_button.clicked.connect(self.on_delete_usage_type_clicked)
+        buttons_layout.addWidget(delete_button)
+        
+        layout.addLayout(buttons_layout)
+    
+    def reload_usage_types(self, *args):
+        """Обновить таблицу типов использования кодов маркировки"""
+        try:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info("Загрузка типов использования кодов маркировки")
+            
+            # Получаем данные из базы через контроллер главного окна
+            if not hasattr(self.main_window, 'controller') or not self.main_window.controller:
+                logger.error("Отсутствует контроллер")
+                return
+            
+            # Получаем типы использования через метод контроллера
+            usage_types = self.main_window.controller.load_usage_types()
+            
+            # Очищаем таблицу
+            self.usage_types_table.setRowCount(0)
+            
+            # Заполняем таблицу данными
+            for i, usage_type in enumerate(usage_types):
+                self.usage_types_table.insertRow(i)
+                
+                # ID
+                id_item = QTableWidgetItem(str(usage_type.id))
+                self.usage_types_table.setItem(i, 0, id_item)
+                
+                # Код
+                code_item = QTableWidgetItem(usage_type.code)
+                self.usage_types_table.setItem(i, 1, code_item)
+                
+                # Название
+                name_item = QTableWidgetItem(usage_type.name)
+                self.usage_types_table.setItem(i, 2, name_item)
+                
+                # Описание
+                description_item = QTableWidgetItem(usage_type.description or "")
+                self.usage_types_table.setItem(i, 3, description_item)
+            
+            # Подгоняем ширину колонок
+            self.usage_types_table.resizeColumnsToContents()
+            
+            logger.info(f"Загружено {len(usage_types)} типов использования")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке типов использования: {str(e)}")
+            logger.exception("Подробная трассировка ошибки:")
+    
+    def on_add_usage_type_clicked(self):
+        """Обработчик нажатия кнопки добавления типа использования"""
+        from PyQt6.QtWidgets import QInputDialog, QLineEdit
+        import logging
+        
+        logger = logging.getLogger(__name__)
+        logger.info("Попытка добавления типа использования")
+        
+        try:
+            # Запрашиваем код типа использования
+            code, ok = QInputDialog.getText(
+                self, "Добавление типа использования", "Введите код типа использования:", QLineEdit.EchoMode.Normal
+            )
+            
+            if ok and code:
+                # Запрашиваем название типа использования
+                name, ok = QInputDialog.getText(
+                    self, "Добавление типа использования", "Введите название типа использования:", QLineEdit.EchoMode.Normal
+                )
+                
+                if ok and name:
+                    # Запрашиваем описание типа использования
+                    description, ok = QInputDialog.getText(
+                        self, "Добавление типа использования", "Введите описание типа использования:", QLineEdit.EchoMode.Normal
+                    )
+                    
+                    if ok:
+                        # Проверка ввода
+                        if not code.strip():
+                            logger.error("Код типа использования не может быть пустым")
+                            QMessageBox.critical(self, "Ошибка", "Код типа использования не может быть пустым")
+                            return
+                        
+                        if not name.strip():
+                            logger.error("Название типа использования не может быть пустым")
+                            QMessageBox.critical(self, "Ошибка", "Название типа использования не может быть пустым")
+                            return
+                        
+                        # Добавляем тип использования через сигнал главного окна
+                        logger.info(f"Отправка сигнала add_usage_type_signal: код={code}, название={name}")
+                        self.main_window.add_usage_type_signal.emit(code, name, description or "")
+                        
+                        # Обновляем таблицу через некоторое время, чтобы дать время контроллеру обработать запрос
+                        QTimer.singleShot(500, self.reload_usage_types)
+        except Exception as e:
+            logger.exception(f"Исключение при добавлении типа использования: {str(e)}")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось добавить тип использования: {str(e)}")
+    
+    def on_edit_usage_type_clicked(self):
+        """Обработчик нажатия кнопки редактирования типа использования"""
+        from PyQt6.QtWidgets import QInputDialog, QLineEdit
+        
+        row = self.usage_types_table.currentRow()
+        if row >= 0:
+            usage_type_id = int(self.usage_types_table.item(row, 0).text())
+            code = self.usage_types_table.item(row, 1).text()
+            name = self.usage_types_table.item(row, 2).text()
+            description = self.usage_types_table.item(row, 3).text() if self.usage_types_table.item(row, 3) else ""
+            
+            # Запрашиваем новый код типа использования
+            new_code, ok = QInputDialog.getText(
+                self, "Редактирование типа использования", "Введите код типа использования:", QLineEdit.EchoMode.Normal, code
+            )
+            
+            if ok and new_code:
+                # Запрашиваем новое название типа использования
+                new_name, ok = QInputDialog.getText(
+                    self, "Редактирование типа использования", "Введите название типа использования:", QLineEdit.EchoMode.Normal, name
+                )
+                
+                if ok and new_name:
+                    # Запрашиваем новое описание типа использования
+                    new_description, ok = QInputDialog.getText(
+                        self, "Редактирование типа использования", "Введите описание типа использования:", QLineEdit.EchoMode.Normal, description
+                    )
+                    
+                    if ok:
+                        try:
+                            # Обновляем тип использования через контроллер
+                            if self.main_window.controller:
+                                self.main_window.controller.update_usage_type(usage_type_id, new_code, new_name, new_description)
+                                # Обновляем таблицу
+                                self.reload_usage_types()
+                        except Exception as e:
+                            QMessageBox.critical(self, "Ошибка", f"Не удалось обновить тип использования: {str(e)}")
+        else:
+            QMessageBox.warning(self, "Ошибка", "Выберите тип использования для редактирования")
+    
+    def on_delete_usage_type_clicked(self):
+        """Обработчик нажатия кнопки удаления типа использования"""
+        row = self.usage_types_table.currentRow()
+        if row >= 0:
+            usage_type_id = int(self.usage_types_table.item(row, 0).text())
+            
+            # Запрашиваем подтверждение
+            reply = QMessageBox.question(
+                self, "Подтверждение удаления", 
+                "Вы уверены, что хотите удалить этот тип использования?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                try:
+                    # Удаляем тип использования через контроллер
+                    if self.main_window.controller:
+                        self.main_window.controller.delete_usage_type(usage_type_id)
+                        # Обновляем таблицу
+                        self.reload_usage_types()
+                except Exception as e:
+                    QMessageBox.critical(self, "Ошибка", f"Не удалось удалить тип использования: {str(e)}")
+        else:
+            QMessageBox.warning(self, "Ошибка", "Выберите тип использования для удаления")
+
 class SettingsDialog(QDialog):
     """Диалог для работы с настройками"""
     def __init__(self, parent=None):
@@ -2223,3 +2855,414 @@ class SettingsDialog(QDialog):
         
         # Пока вкладка пустая, добавляем заглушку
         layout.addWidget(QLabel("Общие настройки находятся в разработке"))
+
+class UtilisationReportDialog(QDialog):
+    """Диалог для создания отчета о нанесении"""
+    
+    def __init__(self, file_id, parent=None, controller=None):
+        super().__init__(parent)
+        self.file_id = file_id
+        self.setWindowTitle("Отчет о нанесении")
+        self.setMinimumWidth(600)
+        self.setMinimumHeight(400)
+        
+        # Получаем данные о файле агрегации из контроллера
+        self.parent_window = parent
+        self.controller = controller  # Сохраняем ссылку на контроллер
+        self.file_data = None
+        
+        # Создаем макет
+        layout = QVBoxLayout(self)
+        
+        # Информация о файле
+        file_info_layout = QFormLayout()
+        self.file_name_label = QLabel("Загрузка...")
+        self.product_label = QLabel("Загрузка...")
+        self.codes_count_label = QLabel("Загрузка...")
+        
+        file_info_layout.addRow("Файл:", self.file_name_label)
+        file_info_layout.addRow("Продукция:", self.product_label)
+        file_info_layout.addRow("Количество кодов:", self.codes_count_label)
+        
+        layout.addLayout(file_info_layout)
+        
+        # Добавляем поля для ввода дополнительной информации
+        additional_info_group = QGroupBox("Параметры отчета о нанесении")
+        additional_info_layout = QFormLayout()
+        
+        # Срок годности
+        self.expiration_date_edit = QDateEdit()
+        self.expiration_date_edit.setCalendarPopup(True)
+        # Устанавливаем текущую дату + 1 год
+        import datetime
+        future_date = datetime.datetime.now() + datetime.timedelta(days=365)
+        self.expiration_date_edit.setDate(QDate(future_date.year, future_date.month, future_date.day))
+        self.expiration_date_edit.setToolTip("Срок годности (может быть извлечен из поля DateExpiration файла агрегации)")
+        additional_info_layout.addRow("Срок годности:", self.expiration_date_edit)
+        
+        # Номер производственной серии
+        self.series_number_edit = QLineEdit("001")
+        self.series_number_edit.setToolTip("Номер производственной серии (может быть извлечен из поля ClaimNumber файла агрегации)")
+        additional_info_layout.addRow("Номер серии:", self.series_number_edit)
+        
+        # Тип использования
+        self.usage_type_combo = QComboBox()
+        
+        # Устанавливаем только допустимые значения согласно API
+        # По документации API, допустимые значения: PRINTED, VERIFIED
+        self.usage_type_combo.addItem("Напечатан (PRINTED)", "PRINTED")
+        self.usage_type_combo.addItem("Проверен (VERIFIED)", "VERIFIED")
+        
+        # Устанавливаем первый элемент по умолчанию
+        self.usage_type_combo.setCurrentIndex(0)
+        
+        self.usage_type_combo.setToolTip("Тип использования кодов маркировки (допустимые значения: PRINTED, VERIFIED)")
+        additional_info_layout.addRow("Тип использования:", self.usage_type_combo)
+        
+        # Добавляем информационную надпись
+        info_label = QLabel("Примечание: Номер серии и срок годности могут быть заполнены автоматически из файла агрегации")
+        info_label.setStyleSheet("color: blue; font-style: italic;")
+        additional_info_layout.addRow("", info_label)
+        
+        additional_info_group.setLayout(additional_info_layout)
+        layout.addWidget(additional_info_group)
+        
+        # Таблица для отображения кодов маркировки
+        self.codes_table = QTableWidget()
+        self.codes_table.setColumnCount(2)
+        self.codes_table.setHorizontalHeaderLabels(["Код маркировки", "Включить в отчет"])
+        self.codes_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.codes_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        
+        # Индикатор загрузки
+        self.loading_label = QLabel("Загрузка данных файла агрегации...")
+        layout.addWidget(self.loading_label)
+        
+        layout.addWidget(QLabel("Выберите коды маркировки для включения в отчет:"))
+        layout.addWidget(self.codes_table)
+        
+        # Кнопки управления
+        button_layout = QHBoxLayout()
+        self.select_all_button = QPushButton("Выбрать все")
+        self.select_all_button.clicked.connect(self.select_all_codes)
+        button_layout.addWidget(self.select_all_button)
+        
+        self.deselect_all_button = QPushButton("Снять выбор")
+        self.deselect_all_button.clicked.connect(self.deselect_all_codes)
+        button_layout.addWidget(self.deselect_all_button)
+        
+        button_layout.addStretch()
+        
+        self.cancel_button = QPushButton("Отмена")
+        self.cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(self.cancel_button)
+        
+        self.submit_button = QPushButton("Отправить отчет")
+        self.submit_button.clicked.connect(self.accept)
+        button_layout.addWidget(self.submit_button)
+        
+        layout.addLayout(button_layout)
+        
+        # Загружаем данные файла
+        self.load_file_data()
+    
+    def load_file_data(self):
+        """Загрузка данных файла агрегации"""
+        try:
+            # Получаем данные из БД через контроллер
+            from models.models import AggregationFile
+            import logging
+            
+            logger = logging.getLogger(__name__)
+            logger.info(f"Начинаем загрузку данных файла агрегации с ID={self.file_id}")
+            
+            # Проверяем, есть ли контроллер
+            if not self.controller:
+                logger.error("Отсутствует контроллер")
+                QMessageBox.critical(self, "Ошибка", "Ошибка конфигурации: отсутствует контроллер")
+                self.reject()
+                return
+                
+            # Проверяем соединение с базой данных
+            if not hasattr(self.controller, 'db') or not self.controller.db:
+                logger.error("У контроллера отсутствует соединение с базой данных")
+                QMessageBox.critical(self, "Ошибка", "Ошибка конфигурации: нет соединения с базой данных")
+                self.reject()
+                return
+            
+            # Получаем данные из контроллера
+            try:
+                # Получаем файл агрегации по ID через метод контроллера
+                logger.info(f"Пробуем получить файл агрегации с ID={self.file_id} через метод контроллера")
+                self.file_data = self.controller.get_aggregation_file_by_id(self.file_id)
+                
+                if self.file_data:
+                    # Файл найден, проверяем наличие кодов маркировки
+                    logger.info(f"Файл агрегации получен: {self.file_data.filename}")
+                    
+                    if not hasattr(self.file_data, 'marking_codes') or not self.file_data.marking_codes:
+                        logger.warning(f"Файл агрегации не содержит кодов маркировки")
+                        QMessageBox.warning(
+                            self,
+                            "Предупреждение",
+                            "Файл агрегации не содержит кодов маркировки для отчета"
+                        )
+                    else:
+                        logger.info(f"Количество кодов маркировки в файле: {len(self.file_data.marking_codes)}")
+                    
+                    # Обновляем UI
+                    self.update_file_info()
+                    return
+                else:
+                    logger.error(f"Файл агрегации с ID={self.file_id} не найден в базе данных")
+                    QMessageBox.critical(
+                        self,
+                        "Ошибка",
+                        f"Не удалось получить данные файла агрегации с ID {self.file_id}"
+                    )
+                    self.reject()
+                    return
+            except Exception as e:
+                logger.error(f"Ошибка при получении данных из контроллера: {str(e)}")
+                logger.exception("Подробная трассировка ошибки:")
+                QMessageBox.critical(
+                    self,
+                    "Ошибка",
+                    f"Не удалось загрузить данные файла агрегации: {str(e)}"
+                )
+                self.reject()
+                return
+            
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке данных файла агрегации: {str(e)}")
+            logger.exception("Подробная трассировка ошибки:")
+            QMessageBox.critical(
+                self,
+                "Ошибка",
+                f"Не удалось загрузить данные файла агрегации: {str(e)}"
+            )
+            self.reject()
+    
+    def update_file_info(self):
+        """Обновление информации о файле и заполнение таблицы"""
+        if not self.file_data:
+            return
+        
+        # Обновляем метки с информацией о файле
+        self.file_name_label.setText(self.file_data.filename)
+        self.product_label.setText(self.file_data.product)
+        self.codes_count_label.setText(str(len(self.file_data.marking_codes)))
+        
+        # Скрываем индикатор загрузки
+        self.loading_label.hide()
+        
+        # Пробуем извлечь номер серии и срок годности из JSON-данных
+        try:
+            import json
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            # Проверяем наличие JSON-содержимого
+            if hasattr(self.file_data, 'json_content') and self.file_data.json_content:
+                logger.info(f"Извлечение данных из JSON: {self.file_data.filename}")
+                
+                # Первая попытка - парсим JSON
+                try:
+                    json_data = json.loads(self.file_data.json_content)
+                    logger.info(f"JSON успешно распарсен, ключи: {', '.join(json_data.keys())}")
+                    
+                    # Извлекаем номер серии (ищем в разных полях)
+                    series_fields = ['ClaimNumber', 'SeriesNumber', 'Batch', 'BatchNumber']
+                    for field in series_fields:
+                        if field in json_data:
+                            claim_number = json_data[field]
+                            self.series_number_edit.setText(claim_number)
+                            logger.info(f"Номер серии извлечен из поля {field}: {claim_number}")
+                            break
+                    
+                    # Извлекаем срок годности (ищем в разных полях)
+                    date_fields = ['DateExpiration', 'ExpirationDate', 'ExpiryDate', 'BestBefore']
+                    for field in date_fields:
+                        if field in json_data:
+                            date_expiration = json_data[field]
+                            logger.info(f"Найдено поле с датой {field}: {date_expiration}")
+                            
+                            # Проверяем различные форматы даты
+                            date_formats = [
+                                '%Y-%m-%d',       # 2023-12-31
+                                '%d.%m.%Y',       # 31.12.2023
+                                '%Y/%m/%d',       # 2023/12/31
+                                '%d/%m/%Y',       # 31/12/2023
+                                '%m/%d/%Y',       # 12/31/2023
+                                '%Y-%m-%dT%H:%M:%S',  # ISO формат
+                                '%Y-%m-%dT%H:%M:%S.%fZ'  # ISO формат с миллисекундами
+                            ]
+                            
+                            expiration_date = None
+                            for date_format in date_formats:
+                                try:
+                                    import datetime
+                                    expiration_date = datetime.datetime.strptime(date_expiration, date_format)
+                                    logger.info(f"Срок годности извлечен из поля {field}: {date_expiration} (формат: {date_format})")
+                                    break
+                                except ValueError:
+                                    continue
+                            
+                            if expiration_date:
+                                self.expiration_date_edit.setDate(QDate(expiration_date.year, expiration_date.month, expiration_date.day))
+                                break
+                            else:
+                                logger.warning(f"Невозможно парсить дату из {field}: {date_expiration}")
+                except json.JSONDecodeError as je:
+                    logger.error(f"Ошибка парсинга JSON: {str(je)}")
+                
+                # Вторая попытка - если JSON не распарсился или не нашли нужные поля, 
+                # пробуем извлечь значения с помощью регулярных выражений
+                if not self.series_number_edit.text() or self.series_number_edit.text() == "001":
+                    import re
+                    
+                    # Ищем номер серии
+                    series_patterns = [
+                        r'ClaimNumber["\s:=]+([^"\s,}]+)',
+                        r'SeriesNumber["\s:=]+([^"\s,}]+)',
+                        r'Batch["\s:=]+([^"\s,}]+)',
+                        r'BatchNumber["\s:=]+([^"\s,}]+)'
+                    ]
+                    
+                    for pattern in series_patterns:
+                        series_match = re.search(pattern, self.file_data.json_content)
+                        if series_match:
+                            series = series_match.group(1).strip('"\'')
+                            self.series_number_edit.setText(series)
+                            logger.info(f"Номер серии извлечен с помощью regex: {series}")
+                            break
+                
+                # Ищем дату с помощью regex, если не нашли раньше
+                date_regex = r'(?:DateExpiration|ExpirationDate|ExpiryDate|BestBefore)["\s:=]+"?([^"\s,}]+)"?'
+                date_match = re.search(date_regex, self.file_data.json_content)
+                if date_match:
+                    date_str = date_match.group(1)
+                    logger.info(f"Дата извлечена с помощью regex: {date_str}")
+                    
+                    # Парсим дату с помощью regex
+                    date_parts = re.findall(r'\d+', date_str)
+                    if len(date_parts) >= 3:
+                        try:
+                            # Предполагаем разные форматы: год-месяц-день или день-месяц-год
+                            # Если первое число > 31, скорее всего это год
+                            if int(date_parts[0]) > 31:
+                                year = int(date_parts[0])
+                                month = int(date_parts[1])
+                                day = int(date_parts[2])
+                            else:
+                                # Иначе это день-месяц-год
+                                day = int(date_parts[0])
+                                month = int(date_parts[1])
+                                year = int(date_parts[2])
+                                
+                                # Если год двузначный, добавляем 2000
+                                if year < 100:
+                                    year += 2000
+                            
+                            # Проверяем валидность даты
+                            if 1 <= month <= 12 and 1 <= day <= 31 and year > 2000:
+                                from PyQt6.QtCore import QDate
+                                self.expiration_date_edit.setDate(QDate(year, month, day))
+                                logger.info(f"Срок годности извлечен из файла с помощью regex: {year}-{month}-{day}")
+                        except (ValueError, IndexError) as e:
+                            logger.warning(f"Ошибка при парсинге даты: {str(e)}")
+                
+        except Exception as e:
+            logger.error(f"Ошибка при извлечении данных из JSON: {str(e)}")
+            logger.exception("Подробная трассировка ошибки:")
+        
+        # Заполняем таблицу кодами маркировки
+        self.codes_table.setRowCount(len(self.file_data.marking_codes))
+        
+        for i, code in enumerate(self.file_data.marking_codes):
+            # Код маркировки
+            self.codes_table.setItem(i, 0, QTableWidgetItem(code))
+            
+            # Чекбокс для выбора
+            checkbox = QTableWidgetItem()
+            checkbox.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            checkbox.setCheckState(Qt.CheckState.Checked)
+            self.codes_table.setItem(i, 1, checkbox)
+        
+        self.codes_table.resizeColumnsToContents()
+    
+    def select_all_codes(self):
+        """Выбрать все коды маркировки"""
+        for i in range(self.codes_table.rowCount()):
+            self.codes_table.item(i, 1).setCheckState(Qt.CheckState.Checked)
+    
+    def deselect_all_codes(self):
+        """Снять выбор со всех кодов маркировки"""
+        for i in range(self.codes_table.rowCount()):
+            self.codes_table.item(i, 1).setCheckState(Qt.CheckState.Unchecked)
+    
+    def get_report_data(self):
+        """Получение данных отчета для отправки"""
+        # Собираем выбранные коды маркировки
+        selected_codes = []
+        for i in range(self.codes_table.rowCount()):
+            if self.codes_table.item(i, 1).checkState() == Qt.CheckState.Checked:
+                code = self.codes_table.item(i, 0).text()
+                # Заменяем текстовое представление [GS] на реальный символ GS (код 29)
+                code = code.replace('[GS]', '\x1d')
+                selected_codes.append(code)
+        
+        # Получаем срок годности из поля ввода
+        expiration_date = self.expiration_date_edit.date().toString('yyyy-MM-dd')
+        
+        # Получаем номер серии из поля ввода
+        series_number = self.series_number_edit.text().strip()
+        if not series_number:
+            series_number = "001"  # Значение по умолчанию
+        
+        # Получаем тип использования из выпадающего списка
+        # Сначала пытаемся получить код из данных элемента
+        usage_type = self.usage_type_combo.currentData()
+        # Если данные не установлены, используем текст
+        if not usage_type:
+            usage_type = self.usage_type_combo.currentText()
+        
+        # Получаем omsId из текущих учетных данных через контроллер
+        omsId = ""
+        try:
+            if self.controller and hasattr(self.controller, 'db'):
+                credentials = self.controller.db.get_credentials()
+                if credentials and len(credentials) > 0:
+                    omsId = credentials[0].omsid
+                    logging.getLogger(__name__).info(f"Получен omsId для отчета: {omsId}")
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Ошибка при получении omsId: {str(e)}")
+            
+        # Если omsId не удалось получить из БД, пытаемся получить из api_client
+        if not omsId and self.controller and hasattr(self.controller, 'api_client'):
+            omsId = self.controller.api_client.omsid
+            if omsId:
+                logging.getLogger(__name__).info(f"Получен omsId из API-клиента: {omsId}")
+        
+        # Формируем структуру данных для отправки отчета в формате API
+        report_data = {
+            "sntins": selected_codes,
+            # Добавляем обязательные поля согласно документации
+            "expirationDate": expiration_date,
+            "seriesNumber": series_number,
+            "usageType": usage_type,
+            "omsId": omsId  # Добавляем omsId в отчет
+        }
+        
+        # Если не удалось получить omsId, показываем предупреждение пользователю
+        if not omsId:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self,
+                "Предупреждение",
+                "Не удалось получить идентификатор СУЗ (omsId). Отчет может быть отклонен API. "
+                "Проверьте настройки учетных данных."
+            )
+            logging.getLogger(__name__).warning("omsId не был добавлен в отчет об использовании")
+        
+        return report_data
