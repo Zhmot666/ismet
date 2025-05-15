@@ -128,6 +128,11 @@ class MainController(QObject):
         self.view.delete_extension_signal.connect(self.delete_extension)
         self.view.set_active_extension_signal.connect(self.set_active_extension)
         
+        # Сигналы для работы с логами API
+        self.view.load_api_logs_signal.connect(self.load_api_logs)
+        self.view.get_api_log_details_signal.connect(self.on_get_api_log_details)
+        self.view.export_api_descriptions_signal.connect(self.export_api_descriptions)
+        
         # Сигналы для работы с комментариями
         self.view.add_comment_signal.connect(self.add_comment)
         self.view.edit_comment_signal.connect(self.edit_comment)
@@ -2458,105 +2463,40 @@ class MainController(QObject):
             extension = self.api_client.extension
             omsid = self.api_client.omsid
             
-            # Проверяем параметры
-            if not extension or not omsid:
-                self.view.show_message("Ошибка", "Отсутствуют необходимые параметры (extension или omsid)")
-                return
+            # Формируем URL для запроса статуса отчета
+            url = f"/api/v2/{extension}/report/info?omsId={omsid}&reportId={report_id}"
             
-            # Логируем начало процесса
-            logger.info(f"Запрос статуса отчета о маркировке: {report_id}")
-            
-            # Формируем URL запроса
-            url = f"/api/v2/{extension}/report/info"
-            
-            # Параметры запроса
-            params = {
-                "omsId": omsid,
-                "reportId": report_id
-            }
-            
-            # Описание запроса для логирования
-            description = f"Запрос статуса отчета о маркировке (ID отчета: {report_id})"
-            
-            # Выполняем запрос к API используя метод request
+            # Выполняем запрос статуса отчета
             success, response, status_code = self.api_client.request(
-                "GET", 
-                url, 
-                params=params,
-                description=description
+                method="GET",
+                url=url,
+                description=f"Запрос статуса отчета о нанесении (reportId: {report_id})"
             )
             
-            # Проверяем наличие ответа
-            if not success or not response:
-                self.view.show_message("Ошибка", "Не получен ответ от API")
-                # Обновляем список логов API, чтобы ошибка отображалась
-                self.load_api_logs()
+            if not success:
+                self.view.show_message("Ошибка", f"Не удалось получить статус отчета: {response.get('error', 'Неизвестная ошибка')}")
                 return
             
-            if not isinstance(response, dict):
-                self.view.show_message("Ошибка", f"Некорректный формат ответа: {type(response)}")
-                # Обновляем список логов API, чтобы ошибка отображалась
-                self.load_api_logs()
-                return
-            
-            # Получаем статус отчета
-            # Согласно документации API, статус содержится в поле reportStatus
-            report_status = response.get("reportStatus", "")
-            status_text = self.get_report_status_text(report_status)
+            # Обрабатываем ответ
+            status = response.get("status")
             
             # Обновляем статус отчета в базе данных
-            if file_id and report_status:
-                self.db.update_aggregation_file_report_status(file_id, report_status)
-                logger.info(f"Обновлен статус отчета для файла агрегации {file_id}: {report_status}")
+            if file_id and status:
+                status_text = self.get_report_status_text(status)
+                self.db.update_aggregation_file_status(file_id, status_text, report_id)
                 
-                # Обновляем таблицу файлов агрегации, чтобы отобразить новый статус
+                # Показываем уведомление пользователю
+                self.view.show_message("Статус отчета", f"Статус отчета: {status_text}")
+                
+                # Обновляем список файлов агрегации
                 self.load_aggregation_files()
             
-            # Формируем сообщение для пользователя
-            message = f"Статус отчета о маркировке (ID: {report_id}): {status_text}"
-            
-            # Отображаем сообщение
-            self.view.show_message("Статус отчета", message)
-            
-            # Логируем результат
-            logger.info(message)
-            
-            # Обновляем список логов API
+            # Обновляем список логов API после запроса статуса
             self.load_api_logs()
             
         except Exception as e:
-            logger.error(f"Ошибка при получении статуса отчета: {str(e)}")
-            self.view.show_message("Ошибка", f"Не удалось получить статус отчета: {str(e)}")
-            # Логируем ошибку в лог API
-            if hasattr(self, 'api_logger') and self.api_logger:
-                try:
-                    self.api_logger.log_request(
-                        "GET",
-                        f"/api/v2/{extension}/report/info",
-                        json.dumps({"omsId": omsid, "reportId": report_id}),
-                        json.dumps({"error": str(e)}),
-                        500,
-                        False,
-                        f"Ошибка при получении статуса отчета о маркировке: {str(e)}"
-                    )
-                except Exception as log_err:
-                    logger.error(f"Не удалось записать ошибку в лог API: {str(log_err)}")
-            
-            # Обновляем список логов API
-            self.load_api_logs()
+            self.view.show_message("Ошибка", f"Ошибка при проверке статуса отчета: {str(e)}")
     
-    def get_report_status_text(self, status):
-        """Возвращает текстовое описание статуса отчета на русском языке
-        
-        Args:
-            status (str): Код статуса (PENDING, READY_TO_SEND, REJECTED, SENT)
-            
-        Returns:
-            str: Текстовое описание статуса на русском
-        """
-        from models.models import ReportStatus
-        return ReportStatus.get_description(status)
-
     def check_aggregation_status(self, file_id, aggregation_report_id):
         """Получение статуса обработки отчета агрегации
         
@@ -2577,92 +2517,39 @@ class MainController(QObject):
             extension = self.api_client.extension
             omsid = self.api_client.omsid
             
-            # Проверяем параметры
-            if not extension or not omsid:
-                self.view.show_message("Ошибка", "Отсутствуют необходимые параметры (extension или omsid)")
-                return
+            # Формируем URL для запроса статуса отчета агрегации
+            url = f"/api/v2/{extension}/report/info?omsId={omsid}&reportId={aggregation_report_id}"
             
-            # Логируем начало процесса
-            logger.info(f"Запрос статуса отчета агрегации: {aggregation_report_id}")
-            
-            # Формируем URL запроса
-            url = f"/api/v2/{extension}/report/info"
-            
-            # Параметры запроса
-            params = {
-                "omsId": omsid,
-                "reportId": aggregation_report_id
-            }
-            
-            # Описание запроса для логирования
-            description = f"Запрос статуса отчета агрегации (ID отчета: {aggregation_report_id})"
-            
-            # Выполняем запрос к API используя метод request
+            # Выполняем запрос статуса отчета агрегации
             success, response, status_code = self.api_client.request(
-                "GET", 
-                url, 
-                params=params,
-                description=description
+                method="GET",
+                url=url,
+                description=f"Запрос статуса отчета агрегации (reportId: {aggregation_report_id})"
             )
             
-            # Проверяем наличие ответа
-            if not success or not response:
-                self.view.show_message("Ошибка", "Не получен ответ от API")
-                # Обновляем список логов API, чтобы ошибка отображалась
-                self.load_api_logs()
+            if not success:
+                self.view.show_message("Ошибка", f"Не удалось получить статус отчета агрегации: {response.get('error', 'Неизвестная ошибка')}")
                 return
             
-            if not isinstance(response, dict):
-                self.view.show_message("Ошибка", f"Некорректный формат ответа: {type(response)}")
-                # Обновляем список логов API, чтобы ошибка отображалась
-                self.load_api_logs()
-                return
-            
-            # Получаем статус отчета
-            # Согласно документации API, статус содержится в поле reportStatus
-            report_status = response.get("reportStatus", "")
-            status_text = self.get_report_status_text(report_status)
+            # Обрабатываем ответ
+            status = response.get("status")
             
             # Обновляем статус отчета в базе данных
-            if file_id and report_status:
-                self.db.update_aggregation_file_aggregation_status(file_id, report_status)
-                logger.info(f"Обновлен статус отчета агрегации для файла {file_id}: {report_status}")
+            if file_id and status:
+                status_text = self.get_report_status_text(status)
+                self.db.update_aggregation_file_aggr_status(file_id, status_text, aggregation_report_id)
                 
-                # Обновляем таблицу файлов агрегации, чтобы отобразить новый статус
+                # Показываем уведомление пользователю
+                self.view.show_message("Статус отчета агрегации", f"Статус отчета агрегации: {status_text}")
+                
+                # Обновляем список файлов агрегации
                 self.load_aggregation_files()
             
-            # Формируем сообщение для пользователя
-            message = f"Статус отчета агрегации (ID: {aggregation_report_id}): {status_text}"
-            
-            # Отображаем сообщение
-            self.view.show_message("Статус отчета агрегации", message)
-            
-            # Логируем результат
-            logger.info(message)
-            
-            # Обновляем список логов API
+            # Обновляем список логов API после запроса статуса
             self.load_api_logs()
             
         except Exception as e:
-            logger.error(f"Ошибка при получении статуса отчета агрегации: {str(e)}")
-            self.view.show_message("Ошибка", f"Не удалось получить статус отчета агрегации: {str(e)}")
-            # Логируем ошибку в лог API
-            if hasattr(self, 'api_logger') and self.api_logger:
-                try:
-                    self.api_logger.log_request(
-                        "GET",
-                        f"/api/v2/{extension}/report/info",
-                        json.dumps({"omsId": omsid, "reportId": aggregation_report_id}),
-                        json.dumps({"error": str(e)}),
-                        500,
-                        False,
-                        f"Ошибка при получении статуса отчета агрегации: {str(e)}"
-                    )
-                except Exception as log_err:
-                    logger.error(f"Не удалось записать ошибку в лог API: {str(log_err)}")
-            
-            # Обновляем список логов API
-            self.load_api_logs()
+            self.view.show_message("Ошибка", f"Ошибка при проверке статуса отчета агрегации: {str(e)}")
 
     def create_order(self, order_data):
         """Создание заказа
@@ -2959,3 +2846,15 @@ class MainController(QObject):
         except Exception as e:
             logger.error(f"Ошибка при удалении комментария: {str(e)}")
             self.view.show_message("Ошибка", f"Ошибка при удалении комментария: {str(e)}")
+
+    def get_report_status_text(self, status):
+        """Возвращает текстовое описание статуса отчета на русском языке
+        
+        Args:
+            status (str): Код статуса (PENDING, READY_TO_SEND, REJECTED, SENT)
+            
+        Returns:
+            str: Текстовое описание статуса на русском
+        """
+        from models.models import ReportStatus
+        return ReportStatus.get_description(status)

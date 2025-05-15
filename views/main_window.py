@@ -342,32 +342,110 @@ class MainWindow(QMainWindow):
                 continue
                 
             # Фильтр по API методу (проверяем наличие в URL)
-            if api_method and api_method not in log["url"].lower():
+            if api_method and api_method.lower() != "все" and api_method not in log["url"].lower():
                 continue
                 
             # Если прошли все фильтры, добавляем лог в отфильтрованный список
             filtered_logs.append(log)
         
+        # Сортируем логи по времени в обратном порядке (новые сверху)
+        sorted_logs = sorted(filtered_logs, key=lambda x: x["timestamp"], reverse=True)
+        
+        # Отключаем обработку выбора во время обновления
+        self.api_logs_table.blockSignals(True)
+        
         # Обновляем таблицу с отфильтрованными логами
-        self._update_api_logs_table_with_data(filtered_logs)
+        self._update_api_logs_table_with_data(sorted_logs)
         
         # Обновляем заголовок вкладки с количеством отображаемых логов
         tab_index = self.tabs.indexOf(self.api_logs_tab)
         if tab_index >= 0:
             self.tabs.setTabText(tab_index, f"Логи API ({len(filtered_logs)})")
+        
+        # Включаем обработку сигналов обратно
+        self.api_logs_table.blockSignals(False)
+        
+        # Выбираем и прокручиваем к первому элементу, если есть записи
+        if sorted_logs and len(sorted_logs) > 0:
+            # Выбираем первую строку (самую новую запись)
+            first_row = 0
+            self.api_logs_table.selectRow(first_row)
+            
+            # Прокручиваем таблицу вверх, чтобы показать выбранную запись
+            self.api_logs_table.scrollToTop()
+            
+            # Получаем ID выбранного лога
+            log_id = int(self.api_logs_table.item(first_row, 0).text())
+            
+            # Сначала обновляем детали запроса и ответа на основе данных из таблицы
+            request_data = self.api_logs_table.item(first_row, 7).text() if self.api_logs_table.item(first_row, 7) else "{}"
+            response_data = self.api_logs_table.item(first_row, 8).text() if self.api_logs_table.item(first_row, 8) else "{}"
+            
+            self.update_request_details(request_data)
+            self.update_response_details(response_data)
+            
+            # Затем запрашиваем актуальные данные из базы
+            self.get_api_log_details_signal.emit(
+                log_id, 
+                lambda data: self.update_request_details(data), 
+                lambda data: self.update_response_details(data)
+            )
+        else:
+            # Очищаем детали запроса и ответа
+            self.request_details.setPlainText("Нет данных запроса")
+            self.response_details.setPlainText("Нет данных ответа")
     
     def reset_api_logs_filters(self):
         """Сброс фильтров логов API"""
         self.http_method_filter.setCurrentIndex(0)
         self.api_method_filter.setCurrentIndex(0)
         
+        # Сортируем логи по времени в обратном порядке (новые сверху)
+        sorted_logs = sorted(self.all_api_logs, key=lambda x: x["timestamp"], reverse=True)
+        
+        # Отключаем обработку выбора во время обновления
+        self.api_logs_table.blockSignals(True)
+        
         # Обновляем таблицу с полным списком логов
-        self._update_api_logs_table_with_data(self.all_api_logs)
+        self._update_api_logs_table_with_data(sorted_logs)
         
         # Обновляем заголовок вкладки
         tab_index = self.tabs.indexOf(self.api_logs_tab)
         if tab_index >= 0:
             self.tabs.setTabText(tab_index, f"Логи API ({len(self.all_api_logs)})")
+        
+        # Включаем обработку сигналов обратно
+        self.api_logs_table.blockSignals(False)
+        
+        # Выбираем и прокручиваем к первому элементу, если есть записи
+        if sorted_logs and len(sorted_logs) > 0:
+            # Выбираем первую строку (самую новую запись)
+            first_row = 0
+            self.api_logs_table.selectRow(first_row)
+            
+            # Прокручиваем таблицу вверх, чтобы показать выбранную запись
+            self.api_logs_table.scrollToTop()
+            
+            # Получаем ID выбранного лога
+            log_id = int(self.api_logs_table.item(first_row, 0).text())
+            
+            # Сначала обновляем детали запроса и ответа на основе данных из таблицы
+            request_data = self.api_logs_table.item(first_row, 7).text() if self.api_logs_table.item(first_row, 7) else "{}"
+            response_data = self.api_logs_table.item(first_row, 8).text() if self.api_logs_table.item(first_row, 8) else "{}"
+            
+            self.update_request_details(request_data)
+            self.update_response_details(response_data)
+            
+            # Затем запрашиваем актуальные данные из базы
+            self.get_api_log_details_signal.emit(
+                log_id, 
+                lambda data: self.update_request_details(data), 
+                lambda data: self.update_response_details(data)
+            )
+        else:
+            # Очищаем детали запроса и ответа
+            self.request_details.setPlainText("Нет данных запроса")
+            self.response_details.setPlainText("Нет данных ответа")
     
     def on_api_log_selected(self):
         """Обработчик выбора лога API в таблице"""
@@ -483,8 +561,11 @@ class MainWindow(QMainWindow):
         # Сохраняем полный список логов для фильтрации
         self.all_api_logs = logs
         
+        # Сортируем логи по времени в обратном порядке (новые сверху)
+        sorted_logs = sorted(logs, key=lambda x: x["timestamp"], reverse=True)
+        
         # Обновляем таблицу
-        self._update_api_logs_table_with_data(logs)
+        self._update_api_logs_table_with_data(sorted_logs)
         
         # Обновляем заголовок вкладки с количеством логов
         tab_index = self.tabs.indexOf(self.api_logs_tab)
@@ -494,43 +575,35 @@ class MainWindow(QMainWindow):
         # Обновляем список API методов в фильтре на основе загруженных логов
         self.update_api_method_filter_items(logs)
         
-        # Автоматически выбираем последнюю запись, если есть записи
-        if logs and len(logs) > 0:
-            # Устанавливаем фокус на последнюю строку
-            last_row = self.api_logs_table.rowCount() - 1
-            if last_row >= 0:
-                # Включаем обработку сигналов обратно
-                self.api_logs_table.blockSignals(False)
-                
-                # Выбираем строку
-                self.api_logs_table.selectRow(last_row)
-                
-                # Прокручиваем таблицу вниз, чтобы показать выбранную запись
-                self.api_logs_table.scrollToItem(self.api_logs_table.item(last_row, 0))
-                
-                # Получаем ID выбранного лога
-                log_id = int(self.api_logs_table.item(last_row, 0).text())
-                
-                # Сначала обновляем детали запроса и ответа на основе данных из таблицы
-                request_data = self.api_logs_table.item(last_row, 7).text() if self.api_logs_table.item(last_row, 7) else "{}"
-                response_data = self.api_logs_table.item(last_row, 8).text() if self.api_logs_table.item(last_row, 8) else "{}"
-                
-                self.update_request_details(request_data)
-                self.update_response_details(response_data)
-                
-                # Затем запрашиваем актуальные данные из базы
-                self.get_api_log_details_signal.emit(
-                    log_id, 
-                    lambda data: self.update_request_details(data), 
-                    lambda data: self.update_response_details(data)
-                )
-            else:
-                # Включаем обработку сигналов обратно
-                self.api_logs_table.blockSignals(False)
-        else:
-            # Включаем обработку сигналов обратно
-            self.api_logs_table.blockSignals(False)
+        # Включаем обработку сигналов обратно
+        self.api_logs_table.blockSignals(False)
+        
+        # Автоматически выбираем самую новую запись, если есть записи
+        if sorted_logs and len(sorted_logs) > 0:
+            # Выбираем первую строку (самую новую запись)
+            first_row = 0
+            self.api_logs_table.selectRow(first_row)
             
+            # Прокручиваем таблицу вверх, чтобы показать выбранную запись
+            self.api_logs_table.scrollToTop()
+            
+            # Получаем ID выбранного лога
+            log_id = int(self.api_logs_table.item(first_row, 0).text())
+            
+            # Сначала обновляем детали запроса и ответа на основе данных из таблицы
+            request_data = self.api_logs_table.item(first_row, 7).text() if self.api_logs_table.item(first_row, 7) else "{}"
+            response_data = self.api_logs_table.item(first_row, 8).text() if self.api_logs_table.item(first_row, 8) else "{}"
+            
+            self.update_request_details(request_data)
+            self.update_response_details(response_data)
+            
+            # Затем запрашиваем актуальные данные из базы
+            self.get_api_log_details_signal.emit(
+                log_id, 
+                lambda data: self.update_request_details(data), 
+                lambda data: self.update_response_details(data)
+            )
+        else:
             # Очищаем детали запроса и ответа
             self.request_details.setPlainText("Нет данных запроса")
             self.response_details.setPlainText("Нет данных ответа")

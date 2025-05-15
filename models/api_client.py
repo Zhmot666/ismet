@@ -967,26 +967,6 @@ class APIClient:
             if self.db:
                 self.log_request(method, url, data, response, description)
             
-            # Логирование запроса через api_logger, если он доступен
-            if self.api_logger:
-                # Преобразование request_data и response_data в формат JSON, если это возможно
-                request_data = data
-                try:
-                    response_data = response.json() if response.content else {}
-                except ValueError:
-                    response_data = {"raw_content": str(response.content)}
-                
-                # Логирование через APILog
-                self.api_logger.log_request(
-                    method=method,
-                    url=url,
-                    request_data=json.dumps(request_data) if request_data else "{}",
-                    response_data=json.dumps(response_data) if response_data else "{}",
-                    status_code=response.status_code,
-                    success=200 <= response.status_code < 300,
-                    description=description
-                )
-            
             # Попытка получить данные JSON из ответа
             try:
                 response_data = response.json()
@@ -1006,17 +986,18 @@ class APIClient:
             # Логирование ошибки
             logger.error(f"Ошибка API запроса: {error_message}")
             
-            # Логирование через api_logger при ошибке
-            if self.api_logger:
-                self.api_logger.log_request(
-                    method=method,
-                    url=url,
-                    request_data=json.dumps(data) if data else "{}",
-                    response_data=json.dumps(error_data),
-                    status_code=0,  # Код 0 для ошибок подключения
-                    success=False,
-                    description=f"{description} (Ошибка: {error_message})" if description else f"Ошибка запроса: {error_message}"
-                )
+            # Логирование ошибки в базу данных
+            if self.db:
+                try:
+                    self.log_request(
+                        method=method,
+                        url=url,
+                        data=data,
+                        response=None,
+                        description=f"{description} (Ошибка: {error_message})" if description else f"Ошибка запроса: {error_message}"
+                    )
+                except Exception as log_err:
+                    logger.error(f"Не удалось залогировать ошибку запроса: {str(log_err)}")
             
             return False, error_data, 0
     
