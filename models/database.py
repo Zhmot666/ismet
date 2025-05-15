@@ -174,6 +174,8 @@ class AggregationFileORM(Base):
     json_content = Column(String)   # Полное содержимое JSON-файла
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    report_id = Column(String)      # Идентификатор отчета нанесения
+    aggregation_report_id = Column(String)  # Идентификатор отчета агрегации
 
 class Database:
     """Класс для работы с базой данных"""
@@ -205,7 +207,7 @@ class Database:
         cursor = self.conn.cursor()
         
         # Создаем таблицу заказов
-        cursor.execute('''
+        cursor.execute('''\
             CREATE TABLE IF NOT EXISTS orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 order_number TEXT NOT NULL,
@@ -216,7 +218,7 @@ class Database:
         ''')
         
         # Создаем таблицу подключений к API
-        cursor.execute('''
+        cursor.execute('''\
             CREATE TABLE IF NOT EXISTS connections (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -228,16 +230,14 @@ class Database:
         ''')
         
         # Создаем таблицу учетных данных
-        cursor.execute('''
+        cursor.execute('''\
             CREATE TABLE IF NOT EXISTS credentials (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 omsid TEXT NOT NULL,
                 token TEXT NOT NULL,
-                gln TEXT,
-                connection_id INTEGER,
+                gln TEXT DEFAULT '',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (connection_id) REFERENCES connections (id)
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
@@ -344,16 +344,20 @@ class Database:
         ''')
         
         # Создаем таблицу файлов агрегации
-        cursor.execute('''
+        cursor.execute('''\
             CREATE TABLE IF NOT EXISTS aggregation_files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 filename TEXT NOT NULL,
                 product TEXT,
-                comment TEXT,
-                json_content TEXT,
                 marking_codes TEXT,
                 level1_codes TEXT,
                 level2_codes TEXT,
+                comment TEXT,
+                json_content TEXT,
+                report_id TEXT,
+                aggregation_report_id TEXT,
+                report_status TEXT,
+                aggregation_status TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -370,6 +374,34 @@ class Database:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        
+        # Таблица для хранения статусов отчетов
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS report_statuses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                description TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Заполняем таблицу статусов отчетов значениями по умолчанию
+        cursor.execute("SELECT COUNT(*) FROM report_statuses")
+        count = cursor.fetchone()[0]
+        
+        if count == 0:
+            # Вставляем статусы отчетов из документации API
+            cursor.execute('''
+                INSERT INTO report_statuses (code, name, description)
+                VALUES 
+                    ('PENDING', 'Отчет находится в ожидании', 'Отчет обрабатывается системой'),
+                    ('READY_TO_SEND', 'Отчет готов к отправке', 'Отчет подготовлен и готов к отправке'),
+                    ('REJECTED', 'Отчет отклонен', 'Отчет был отклонен системой'),
+                    ('SENT', 'Отчет отправлен', 'Отчет успешно отправлен')
+            ''')
+            logging.info("Добавлены статусы отчетов по умолчанию")
         
         self.conn.commit()
         logger.info("Таблицы в базе данных созданы")
@@ -403,6 +435,45 @@ class Database:
                 cursor.execute("ALTER TABLE credentials ADD COLUMN gln TEXT DEFAULT ''")
                 self.conn.commit()
                 logger.info("Добавлена колонка gln в таблицу credentials")
+            except Exception as e:
+                logger.error(f"Ошибка при миграции базы данных: {str(e)}")
+        
+        # Проверяем и добавляем столбцы report_id и aggregation_report_id в таблицу aggregation_files
+        cursor.execute("PRAGMA table_info(aggregation_files)")
+        columns = cursor.fetchall()
+        column_names = [column["name"] for column in columns]
+        
+        # Если колонки нет, добавляем её
+        if "report_id" not in column_names:
+            try:
+                cursor.execute("ALTER TABLE aggregation_files ADD COLUMN report_id TEXT DEFAULT ''")
+                self.conn.commit()
+                logger.info("Добавлена колонка report_id в таблицу aggregation_files")
+            except Exception as e:
+                logger.error(f"Ошибка при миграции базы данных: {str(e)}")
+        
+        if "aggregation_report_id" not in column_names:
+            try:
+                cursor.execute("ALTER TABLE aggregation_files ADD COLUMN aggregation_report_id TEXT DEFAULT ''")
+                self.conn.commit()
+                logger.info("Добавлена колонка aggregation_report_id в таблицу aggregation_files")
+            except Exception as e:
+                logger.error(f"Ошибка при миграции базы данных: {str(e)}")
+        
+        # Проверяем и добавляем столбцы report_status и aggregation_status в таблицу aggregation_files
+        if "report_status" not in column_names:
+            try:
+                cursor.execute("ALTER TABLE aggregation_files ADD COLUMN report_status TEXT")
+                self.conn.commit()
+                logger.info("Добавлена колонка report_status в таблицу aggregation_files")
+            except Exception as e:
+                logger.error(f"Ошибка при миграции базы данных: {str(e)}")
+        
+        if "aggregation_status" not in column_names:
+            try:
+                cursor.execute("ALTER TABLE aggregation_files ADD COLUMN aggregation_status TEXT")
+                self.conn.commit()
+                logger.info("Добавлена колонка aggregation_status в таблицу aggregation_files")
             except Exception as e:
                 logger.error(f"Ошибка при миграции базы данных: {str(e)}")
                 
@@ -1207,29 +1278,70 @@ class Database:
     # Методы для работы с логами API
     def add_api_log(self, method, url, request, response, status_code, success=True, description=None):
         """Добавление записи в лог API-запросов"""
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "INSERT INTO api_logs (method, url, request, response, status_code, success, description) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (method, url, request, response, status_code, 1 if success else 0, description)
-        )
-        self.conn.commit()
-        
-        cursor.execute(
-            "SELECT * FROM api_logs WHERE id = ?",
-            (cursor.lastrowid,)
-        )
-        row = cursor.fetchone()
-        return {
-            "id": row["id"],
-            "method": row["method"],
-            "url": row["url"],
-            "request": row["request"],
-            "response": row["response"],
-            "status_code": row["status_code"],
-            "success": bool(row["success"]),
-            "description": row["description"] if "description" in row.keys() else None,
-            "timestamp": row["timestamp"]
-        }
+        try:
+            # Проверяем, что request и response имеют правильный формат JSON
+            # Если это не JSON строки, преобразуем их
+            import json
+            
+            # Преобразуем request в JSON строку, если это необходимо
+            if request is not None:
+                if not isinstance(request, str):
+                    try:
+                        request = json.dumps(request)
+                    except (TypeError, ValueError):
+                        request = str(request)
+            else:
+                request = "{}"
+                
+            # Преобразуем response в JSON строку, если это необходимо
+            if response is not None:
+                if not isinstance(response, str):
+                    try:
+                        response = json.dumps(response)
+                    except (TypeError, ValueError):
+                        response = str(response)
+            else:
+                response = "{}"
+            
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "INSERT INTO api_logs (method, url, request, response, status_code, success, description) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (method, url, request, response, status_code, 1 if success else 0, description)
+            )
+            self.conn.commit()
+            
+            cursor.execute(
+                "SELECT * FROM api_logs WHERE id = ?",
+                (cursor.lastrowid,)
+            )
+            row = cursor.fetchone()
+            return {
+                "id": row["id"],
+                "method": row["method"],
+                "url": row["url"],
+                "request": row["request"],
+                "response": row["response"],
+                "status_code": row["status_code"],
+                "success": bool(row["success"]),
+                "description": row["description"] if "description" in row.keys() else None,
+                "timestamp": row["timestamp"]
+            }
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Ошибка при добавлении записи в лог API: {str(e)}")
+            # Попытка простой вставки с минимальными данными в случае ошибки
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "INSERT INTO api_logs (method, url, request, response, status_code, success, description) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (method, url, "{}", "{}", status_code, 1 if success else 0, description)
+                )
+                self.conn.commit()
+                return {"id": cursor.lastrowid}
+            except Exception as e2:
+                logger.error(f"Повторная ошибка при логировании API: {str(e2)}")
+                return {"id": -1}
     
     def get_api_logs(self, limit=100, offset=0, success=None, method=None, url_pattern=None, date_from=None, date_to=None):
         """Получение списка логов API-запросов с фильтрацией"""
@@ -1283,29 +1395,51 @@ class Database:
     
     def get_api_log_by_id(self, log_id):
         """Получение записи лога API-запроса по ID"""
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM api_logs WHERE id = ?", (log_id,))
-        row = cursor.fetchone()
-        
-        if not row:
-            return None
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT * FROM api_logs WHERE id = ?", (log_id,))
+            row = cursor.fetchone()
             
-        log_entry = {
-            "id": row["id"],
-            "method": row["method"],
-            "url": row["url"],
-            "request": row["request"],
-            "response": row["response"],
-            "status_code": row["status_code"],
-            "success": bool(row["success"]),
-            "timestamp": row["timestamp"]
-        }
-        
-        # Добавляем поле description, если оно есть
-        if "description" in row.keys():
-            log_entry["description"] = row["description"]
+            if not row:
+                return None
+                
+            # Проверяем данные запроса и ответа
+            request_data = row["request"]
+            response_data = row["response"]
             
-        return log_entry
+            # Проверяем, чтобы request и response были строками
+            if request_data is None:
+                request_data = "{}"
+            if response_data is None:
+                response_data = "{}"
+            
+            # Формируем данные лога
+            log_entry = {
+                "id": row["id"],
+                "method": row["method"],
+                "url": row["url"],
+                "request": request_data,
+                "response": response_data,
+                "status_code": row["status_code"],
+                "success": bool(row["success"]),
+                "timestamp": row["timestamp"]
+            }
+            
+            # Добавляем поле description, если оно есть
+            if "description" in row.keys():
+                log_entry["description"] = row["description"]
+                
+            return log_entry
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Ошибка при получении записи лога API по ID {log_id}: {str(e)}")
+            # Возвращаем минимальный набор данных в случае ошибки
+            return {
+                "id": log_id,
+                "request": "{}",
+                "response": "{}"
+            }
     
     def count_api_logs(self, date_from=None, success=None):
         """Подсчет количества логов API-запросов"""
@@ -1707,10 +1841,6 @@ class Database:
             
             if "updated_at" not in column_names:
                 cursor.execute("ALTER TABLE api_orders ADD COLUMN updated_at TIMESTAMP")
-                schema_updated = True
-                
-            if "buffers" not in column_names:
-                cursor.execute("ALTER TABLE api_orders ADD COLUMN buffers TEXT")
                 schema_updated = True
                 
             if schema_updated:
@@ -2137,8 +2267,9 @@ class Database:
     # Методы для работы с файлами агрегации
     def add_aggregation_file(self, filename: str, product: str, marking_codes: List[str], 
                            level1_codes: List[str], level2_codes: List[str], 
-                           comment: str = "", json_content: str = "") -> AggregationFile:
-        """Добавление нового файла агрегации
+                           comment: str = "", json_content: str = "", 
+                           report_id: str = "", aggregation_report_id: str = "") -> AggregationFile:
+        """Добавление файла агрегации в базу данных
         
         Args:
             filename (str): Имя файла
@@ -2146,31 +2277,39 @@ class Database:
             marking_codes (List[str]): Список кодов маркировки
             level1_codes (List[str]): Список кодов агрегации 1 уровня
             level2_codes (List[str]): Список кодов агрегации 2 уровня
-            comment (str, optional): Комментарий к файлу. По умолчанию "".
-            json_content (str, optional): Полное содержимое JSON-файла. По умолчанию "".
+            comment (str, optional): Комментарий
+            json_content (str, optional): Полное содержимое JSON-файла
+            report_id (str, optional): Идентификатор отчета нанесения
+            aggregation_report_id (str, optional): Идентификатор отчета агрегации
             
         Returns:
             AggregationFile: Объект файла агрегации
         """
         try:
-            cursor = self.conn.cursor()
+            # Сериализуем списки кодов в JSON-строки
+            marking_codes_json = json.dumps(marking_codes) if marking_codes else "[]"
+            level1_codes_json = json.dumps(level1_codes) if level1_codes else "[]"
+            level2_codes_json = json.dumps(level2_codes) if level2_codes else "[]"
+            
+            # Текущее время
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
-            # Преобразуем списки в JSON-строки
-            marking_codes_json = json.dumps(marking_codes)
-            level1_codes_json = json.dumps(level1_codes)
-            level2_codes_json = json.dumps(level2_codes)
-            
+            # Добавляем запись в таблицу
+            cursor = self.conn.cursor()
             cursor.execute('''
                 INSERT INTO aggregation_files 
-                (filename, product, marking_codes, level1_codes, level2_codes, comment, json_content, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (filename, product, marking_codes_json, level1_codes_json, level2_codes_json, comment, json_content, current_time, current_time))
+                (filename, product, marking_codes, level1_codes, level2_codes, 
+                comment, json_content, created_at, report_id, aggregation_report_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (filename, product, marking_codes_json, level1_codes_json, level2_codes_json, 
+                 comment, json_content, current_time, report_id, aggregation_report_id))
             
             file_id = cursor.lastrowid
+            
+            # Сохраняем изменения
             self.conn.commit()
             
-            # Создаем и возвращаем объект файла агрегации
+            # Создаем и возвращаем объект
             return AggregationFile(
                 id=file_id,
                 filename=filename,
@@ -2180,99 +2319,107 @@ class Database:
                 level2_codes=level2_codes,
                 comment=comment,
                 json_content=json_content,
-                created_at=datetime.strptime(current_time, "%Y-%m-%d %H:%M:%S")
+                report_id=report_id,
+                aggregation_report_id=aggregation_report_id
             )
             
         except Exception as e:
             logger.error(f"Ошибка при добавлении файла агрегации: {str(e)}")
             raise e
-            
-    def get_aggregation_files(self) -> List[AggregationFile]:
-        """Получение списка всех файлов агрегации
+    
+    def get_aggregation_files(self):
+        """Получение списка файлов агрегации из базы данных
         
         Returns:
             List[AggregationFile]: Список объектов файлов агрегации
         """
         try:
+            # Проверяем, существует ли таблица
             cursor = self.conn.cursor()
-            
-            # Проверяем, существует ли колонка product
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='aggregation_files'")
+            if not cursor.fetchone():
+                logging.warning("Таблица aggregation_files не существует")
+                return []
+
+            # Проверка наличия столбцов report_id и aggregation_report_id
             cursor.execute("PRAGMA table_info(aggregation_files)")
             columns = cursor.fetchall()
-            column_names = [column["name"] for column in columns]
+            column_names = [column[1] for column in columns]
             
-            logger.info(f"Колонки в таблице aggregation_files: {column_names}")
-            
-            # Если колонки нет, добавляем их
-            schema_updated = False
-            if "product" not in column_names:
-                cursor.execute("ALTER TABLE aggregation_files ADD COLUMN product TEXT")
-                schema_updated = True
-                logger.info("Добавлена колонка product в таблицу aggregation_files")
+            # Если столбцы отсутствуют, добавляем их
+            columns_to_add = []
+            if 'report_id' not in column_names:
+                columns_to_add.append("report_id TEXT")
+            if 'aggregation_report_id' not in column_names:
+                columns_to_add.append("aggregation_report_id TEXT")
+            if 'report_status' not in column_names:
+                columns_to_add.append("report_status TEXT")
+            if 'aggregation_status' not in column_names:
+                columns_to_add.append("aggregation_status TEXT")
                 
-            if "json_content" not in column_names:
-                cursor.execute("ALTER TABLE aggregation_files ADD COLUMN json_content TEXT")
-                schema_updated = True
-                logger.info("Добавлена колонка json_content в таблицу aggregation_files")
-                
-            if schema_updated:
+            for column in columns_to_add:
+                cursor.execute(f"ALTER TABLE aggregation_files ADD COLUMN {column}")
                 self.conn.commit()
-                logger.info("Автоматическое обновление схемы таблицы aggregation_files завершено")
+                logging.info(f"Добавлен столбец {column} в таблицу aggregation_files")
             
-            cursor.execute('''
-                SELECT id, filename, product, marking_codes, level1_codes, level2_codes, comment, json_content, created_at
-                FROM aggregation_files
-                ORDER BY created_at DESC
-            ''')
+            # Получаем файлы агрегации с учетом новых столбцов
+            cursor.execute("""
+                SELECT 
+                    id, filename, product, marking_codes, level1_codes, level2_codes, 
+                    comment, json_content, report_id, aggregation_report_id, report_status, aggregation_status
+                FROM aggregation_files 
+                ORDER BY id DESC
+            """)
+            rows = cursor.fetchall()
             
-            result = []
-            for row in cursor.fetchall():
-                # Логирование для отладки
-                logger.info(f"Получен файл из БД: {row['filename']}")
+            files = []
+            for row in rows:
+                id, filename, product, marking_codes_str, level1_codes_str, level2_codes_str, comment, json_content, report_id, aggregation_report_id, report_status, aggregation_status = row
                 
-                # Преобразуем JSON-строки обратно в списки
-                marking_codes = []
-                level1_codes = []
-                level2_codes = []
+                # Преобразуем строки с кодами в списки
+                try:
+                    marking_codes = json.loads(marking_codes_str) if marking_codes_str else []
+                except json.JSONDecodeError:
+                    marking_codes = marking_codes_str.split(',') if marking_codes_str else []
+                    logging.warning(f"Не удалось разобрать JSON для marking_codes: {marking_codes_str}")
                 
                 try:
-                    if row['marking_codes']:
-                        marking_codes = json.loads(row['marking_codes'])
-                    if row['level1_codes']:
-                        level1_codes = json.loads(row['level1_codes'])
-                    if row['level2_codes']:
-                        level2_codes = json.loads(row['level2_codes'])
-                except json.JSONDecodeError as e:
-                    logger.error(f"Ошибка при десериализации JSON для файла {row['filename']}: {str(e)}")
+                    level1_codes = json.loads(level1_codes_str) if level1_codes_str else []
+                except json.JSONDecodeError:
+                    level1_codes = level1_codes_str.split(',') if level1_codes_str else []
+                    logging.warning(f"Не удалось разобрать JSON для level1_codes: {level1_codes_str}")
                 
-                # Получаем product и json_content, если они есть
-                product = row['product'] if 'product' in row.keys() else ""
-                json_content = row['json_content'] if 'json_content' in row.keys() else ""
-                
-                logger.info(f"Файл {row['filename']}: продукция='{product}', коды маркировки={len(marking_codes)}, " +
-                    f"коды 1 уровня={len(level1_codes)}, коды 2 уровня={len(level2_codes)}")
+                try:
+                    level2_codes = json.loads(level2_codes_str) if level2_codes_str else []
+                except json.JSONDecodeError:
+                    level2_codes = level2_codes_str.split(',') if level2_codes_str else []
+                    logging.warning(f"Не удалось разобрать JSON для level2_codes: {level2_codes_str}")
                 
                 # Создаем объект файла агрегации
                 file = AggregationFile(
-                    id=row['id'],
-                    filename=row['filename'],
+                    id=id,
+                    filename=filename,
                     product=product,
                     marking_codes=marking_codes,
                     level1_codes=level1_codes,
                     level2_codes=level2_codes,
-                    comment=row['comment'],
-                    json_content=json_content,
-                    created_at=datetime.strptime(row['created_at'], "%Y-%m-%d %H:%M:%S") if row['created_at'] else None
+                    comment=comment if comment else "",
+                    json_content=json_content if json_content else "",
+                    report_id=report_id if report_id else "",
+                    aggregation_report_id=aggregation_report_id if aggregation_report_id else "",
+                    report_status=report_status if report_status else "",
+                    aggregation_status=aggregation_status if aggregation_status else ""
                 )
-                result.append(file)
-                
-            logger.info(f"Всего получено файлов агрегации: {len(result)}")
-            return result
+                files.append(file)
+            
+            logging.info(f"Всего получено файлов агрегации: {len(files)}")
+            return files
             
         except Exception as e:
-            logger.error(f"Ошибка при получении списка файлов агрегации: {str(e)}")
-            raise e
-            
+            logging.error(f"Ошибка при получении списка файлов агрегации: {str(e)}")
+            logging.exception("Подробная информация об ошибке:")
+            return []
+    
     def get_aggregation_file_by_id(self, file_id: int) -> Optional[AggregationFile]:
         """Получение файла агрегации по ID
         
@@ -2290,22 +2437,38 @@ class Database:
                 logger.error("Отсутствует соединение с базой данных")
                 return None
             
-            # Выполняем запрос
+            # Проверяем существование таблицы
             cursor = self.conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='aggregation_files'")
+            table_exists = cursor.fetchone()
             
-            # Проверяем, существует ли запись с таким ID
-            cursor.execute("SELECT COUNT(*) FROM aggregation_files WHERE id = ?", (file_id,))
-            count = cursor.fetchone()[0]
-            if count == 0:
-                logger.warning(f"Файл агрегации с ID={file_id} не найден в базе данных")
+            if not table_exists:
+                logger.error("Таблица aggregation_files не существует в базе данных")
                 return None
-                
-            logger.info(f"Файл агрегации с ID={file_id} найден в базе данных")
             
+            # Проверка наличия столбцов report_status и aggregation_status
+            cursor.execute("PRAGMA table_info(aggregation_files)")
+            columns = cursor.fetchall()
+            column_names = [column[1] for column in columns]
+            
+            # Если столбцы отсутствуют, добавляем их
+            columns_to_add = []
+            if 'report_status' not in column_names:
+                columns_to_add.append("report_status TEXT")
+            if 'aggregation_status' not in column_names:
+                columns_to_add.append("aggregation_status TEXT")
+                
+            for column in columns_to_add:
+                cursor.execute(f"ALTER TABLE aggregation_files ADD COLUMN {column}")
+                self.conn.commit()
+                logging.info(f"Добавлен столбец {column} в таблицу aggregation_files")
+            
+            # Выполняем запрос
             cursor.execute(
                 """
                 SELECT id, filename, product, comment, json_content, 
-                       marking_codes, level1_codes, level2_codes, created_at
+                       marking_codes, level1_codes, level2_codes, created_at,
+                       report_id, aggregation_report_id, report_status, aggregation_status
                 FROM aggregation_files
                 WHERE id = ?
                 """,
@@ -2319,35 +2482,43 @@ class Database:
             
             logger.info(f"Данные получены для файла {row[1]} (ID={file_id})")
             
-            # Преобразуем JSON-строки в списки
-            marking_codes = []
-            level1_codes = []
-            level2_codes = []
+            # Десериализуем данные из JSON
+            try:
+                marking_codes = json.loads(row[5]) if row[5] else []
+            except json.JSONDecodeError:
+                marking_codes = []
+                logger.warning(f"Ошибка десериализации marking_codes для файла {row[1]} (ID={file_id})")
             
             try:
-                if row[5]:
-                    marking_codes = json.loads(row[5])
-                    logger.info(f"Количество кодов маркировки: {len(marking_codes)}")
-                if row[6]:
-                    level1_codes = json.loads(row[6])
-                    logger.info(f"Количество кодов 1 уровня: {len(level1_codes)}")
-                if row[7]:
-                    level2_codes = json.loads(row[7])
-                    logger.info(f"Количество кодов 2 уровня: {len(level2_codes)}")
-            except json.JSONDecodeError as e:
-                logger.error(f"Ошибка при десериализации JSON для файла {row[1]}: {str(e)}")
+                level1_codes = json.loads(row[6]) if row[6] else []
+            except json.JSONDecodeError:
+                level1_codes = []
+                logger.warning(f"Ошибка десериализации level1_codes для файла {row[1]} (ID={file_id})")
             
-            # Данные json_content, если есть
-            json_content = row[4] if row[4] else ""
+            try:
+                level2_codes = json.loads(row[7]) if row[7] else []
+            except json.JSONDecodeError:
+                level2_codes = []
+                logger.warning(f"Ошибка десериализации level2_codes для файла {row[1]} (ID={file_id})")
             
-            # Пытаемся преобразовать json_content в словарь для параметра data
+            # Получаем JSON-содержимое
+            json_content = row[4]
+            
+            # Парсим JSON для извлечения дополнительных данных
             data = {}
             if json_content:
                 try:
                     data = json.loads(json_content)
-                    logger.info(f"Данные JSON успешно десериализованы, размер: {len(str(data))} символов")
                 except json.JSONDecodeError:
-                    logger.error(f"Не удалось преобразовать json_content в словарь для файла {row[1]}")
+                    logger.warning(f"Ошибка десериализации JSON-содержимого для файла {row[1]} (ID={file_id})")
+            
+            # Получаем идентификаторы отчетов
+            report_id = row[9]
+            aggregation_report_id = row[10]
+            
+            # Получаем статусы отчетов (могут быть None)
+            report_status = row[11] if len(row) > 11 else None
+            aggregation_status = row[12] if len(row) > 12 else None
             
             # Создаем и возвращаем объект AggregationFile
             file = AggregationFile(
@@ -2360,7 +2531,11 @@ class Database:
                 comment=row[3],
                 json_content=json_content,
                 created_at=datetime.strptime(row[8], "%Y-%m-%d %H:%M:%S") if row[8] else None,
-                data=data
+                data=data,
+                report_id=report_id,
+                aggregation_report_id=aggregation_report_id,
+                report_status=report_status,
+                aggregation_status=aggregation_status
             )
             
             logger.info(f"Объект AggregationFile успешно создан для файла {row[1]} (ID={file_id})")
@@ -2505,7 +2680,11 @@ class Database:
                     marking_codes TEXT NULL,
                     level1_codes TEXT NULL,
                     level2_codes TEXT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    report_id TEXT NULL,
+                    aggregation_report_id TEXT NULL,
+                    report_status TEXT NULL,
+                    aggregation_status TEXT NULL
                 );
                 
                 -- Таблица для хранения типов использования кодов маркировки
@@ -2516,6 +2695,16 @@ class Database:
                     description TEXT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
+                
+                -- Таблица для хранения статусов отчетов
+                CREATE TABLE IF NOT EXISTS report_statuses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
             ''')
             
             # Заполняем таблицы значениями по умолчанию
@@ -2623,6 +2812,28 @@ class Database:
                     cursor.execute(
                         "INSERT INTO usage_types (code, name, description) VALUES (?, ?, ?)",
                         usage_type
+                    )
+            
+            # Проверяем, есть ли в базе данных статусы отчетов
+            cursor.execute("SELECT COUNT(*) FROM report_statuses")
+            count = cursor.fetchone()[0]
+            
+            # Если нет статусов отчетов, добавляем их
+            if count == 0:
+                logger.info("Добавление статусов отчетов по умолчанию")
+                
+                # Заполняем таблицу статусов отчетов
+                report_statuses = [
+                    ("PENDING", "Отчет находится в ожидании", "Отчет обрабатывается системой"),
+                    ("READY_TO_SEND", "Отчет готов к отправке", "Отчет подготовлен и готов к отправке"),
+                    ("REJECTED", "Отчет отклонен", "Отчет был отклонен системой"),
+                    ("SENT", "Отчет отправлен", "Отчет успешно отправлен")
+                ]
+                
+                for status in report_statuses:
+                    cursor.execute(
+                        "INSERT INTO report_statuses (code, name, description) VALUES (?, ?, ?)",
+                        status
                     )
             
             self.conn.commit()
@@ -2818,4 +3029,220 @@ class Database:
             
         except Exception as e:
             logger.error(f"Ошибка при удалении типа использования: {str(e)}")
+            return False
+    
+    def update_aggregation_file_report_id(self, file_id: int, report_id: str) -> bool:
+        """Обновляет идентификатор отчета о нанесении для файла агрегации
+        
+        Args:
+            file_id (int): ID файла агрегации
+            report_id (str): Идентификатор отчета о нанесении
+            
+        Returns:
+            bool: True, если обновление выполнено успешно, иначе False
+        """
+        try:
+            # Проверяем существование таблицы
+            cursor = self.conn.cursor()
+            
+            # Проверяем, существует ли столбец report_id в таблице
+            cursor.execute("PRAGMA table_info(aggregation_files)")
+            columns = cursor.fetchall()
+            column_names = [column[1] for column in columns]
+            
+            # Если столбец report_id отсутствует, добавляем его
+            if 'report_id' not in column_names:
+                cursor.execute("ALTER TABLE aggregation_files ADD COLUMN report_id TEXT")
+                self.conn.commit()
+                logging.info("Добавлен столбец report_id в таблицу aggregation_files")
+                
+            # Аналогично для столбца aggregation_report_id
+            if 'aggregation_report_id' not in column_names:
+                cursor.execute("ALTER TABLE aggregation_files ADD COLUMN aggregation_report_id TEXT")
+                self.conn.commit()
+                logging.info("Добавлен столбец aggregation_report_id в таблицу aggregation_files")
+            
+            # Обновляем запись
+            cursor.execute(
+                "UPDATE aggregation_files SET report_id = ? WHERE id = ?",
+                (report_id, file_id)
+            )
+            self.conn.commit()
+            
+            if cursor.rowcount > 0:
+                logging.info(f"Обновлен report_id для файла агрегации с ID {file_id}: {report_id}")
+                return True
+            else:
+                logging.warning(f"Не найден файл агрегации с ID {file_id} для обновления report_id")
+                return False
+                
+        except Exception as e:
+            logging.error(f"Ошибка при обновлении report_id для файла агрегации: {str(e)}")
+            return False
+            
+    def update_aggregation_file_aggregation_report_id(self, file_id: int, aggregation_report_id: str) -> bool:
+        """Обновляет идентификатор отчета агрегации для файла агрегации
+        
+        Args:
+            file_id (int): ID файла агрегации
+            aggregation_report_id (str): Идентификатор отчета агрегации
+            
+        Returns:
+            bool: True, если обновление выполнено успешно, иначе False
+        """
+        try:
+            # Проверяем существование таблицы
+            cursor = self.conn.cursor()
+            
+            # Проверяем, существует ли столбец aggregation_report_id в таблице
+            cursor.execute("PRAGMA table_info(aggregation_files)")
+            columns = cursor.fetchall()
+            column_names = [column[1] for column in columns]
+            
+            # Если столбец aggregation_report_id отсутствует, добавляем его
+            if 'aggregation_report_id' not in column_names:
+                cursor.execute("ALTER TABLE aggregation_files ADD COLUMN aggregation_report_id TEXT")
+                self.conn.commit()
+                logging.info("Добавлен столбец aggregation_report_id в таблицу aggregation_files")
+            
+            # Обновляем запись
+            cursor.execute(
+                "UPDATE aggregation_files SET aggregation_report_id = ? WHERE id = ?",
+                (aggregation_report_id, file_id)
+            )
+            self.conn.commit()
+            
+            if cursor.rowcount > 0:
+                logging.info(f"Обновлен aggregation_report_id для файла агрегации с ID {file_id}: {aggregation_report_id}")
+                return True
+            else:
+                logging.warning(f"Не найден файл агрегации с ID {file_id} для обновления aggregation_report_id")
+                return False
+                
+        except Exception as e:
+            logging.error(f"Ошибка при обновлении aggregation_report_id для файла агрегации: {str(e)}")
+            return False
+    
+    def update_aggregation_file_report_status(self, file_id: int, report_status: str) -> bool:
+        """Обновляет статус отчета о нанесении для файла агрегации
+        
+        Args:
+            file_id (int): ID файла агрегации
+            report_status (str): Статус отчета (PENDING, READY_TO_SEND, REJECTED, SENT)
+            
+        Returns:
+            bool: True, если обновление выполнено успешно, иначе False
+        """
+        try:
+            # Проверяем существование таблицы
+            cursor = self.conn.cursor()
+            
+            # Обновляем статус
+            cursor.execute(
+                "UPDATE aggregation_files SET report_status = ? WHERE id = ?",
+                (report_status, file_id)
+            )
+            self.conn.commit()
+            
+            # Проверяем, была ли обновлена запись
+            if cursor.rowcount > 0:
+                logging.info(f"Обновлен report_status для файла агрегации с ID {file_id}: {report_status}")
+                return True
+            else:
+                # Проверяем, существует ли запись для указанного ID
+                cursor.execute("SELECT id FROM aggregation_files WHERE id = ?", (file_id,))
+                if cursor.fetchone():
+                    # Запись существует, но поле report_status может отсутствовать
+                    # Добавляем колонку report_status, если она отсутствует
+                    cursor.execute("PRAGMA table_info(aggregation_files)")
+                    columns = cursor.fetchall()
+                    column_names = [column[1] for column in columns]
+                    
+                    if 'report_status' not in column_names:
+                        cursor.execute("ALTER TABLE aggregation_files ADD COLUMN report_status TEXT")
+                        self.conn.commit()
+                        logging.info("Добавлена колонка report_status в таблицу aggregation_files")
+                        
+                        # Повторяем обновление
+                        cursor.execute(
+                            "UPDATE aggregation_files SET report_status = ? WHERE id = ?",
+                            (report_status, file_id)
+                        )
+                        self.conn.commit()
+                        
+                        if cursor.rowcount > 0:
+                            logging.info(f"Обновлен report_status для файла агрегации с ID {file_id}: {report_status}")
+                            return True
+                    
+                    # Другая причина, возможно несоответствие типов данных
+                    logging.warning(f"Не удалось обновить report_status для файла с ID {file_id}")
+                    return False
+                else:
+                    logging.warning(f"Не найден файл агрегации с ID {file_id} для обновления report_status")
+                    return False
+                    
+        except Exception as e:
+            logging.error(f"Ошибка при обновлении report_status для файла агрегации: {str(e)}")
+            return False
+    
+    def update_aggregation_file_aggregation_status(self, file_id: int, aggregation_status: str) -> bool:
+        """Обновляет статус отчета агрегации для файла агрегации
+        
+        Args:
+            file_id (int): ID файла агрегации
+            aggregation_status (str): Статус отчета агрегации (PENDING, READY_TO_SEND, REJECTED, SENT)
+            
+        Returns:
+            bool: True, если обновление выполнено успешно, иначе False
+        """
+        try:
+            # Проверяем существование таблицы
+            cursor = self.conn.cursor()
+            
+            # Обновляем статус
+            cursor.execute(
+                "UPDATE aggregation_files SET aggregation_status = ? WHERE id = ?",
+                (aggregation_status, file_id)
+            )
+            self.conn.commit()
+            
+            # Проверяем, была ли обновлена запись
+            if cursor.rowcount > 0:
+                logging.info(f"Обновлен aggregation_status для файла агрегации с ID {file_id}: {aggregation_status}")
+                return True
+            else:
+                # Проверяем, существует ли запись для указанного ID
+                cursor.execute("SELECT id FROM aggregation_files WHERE id = ?", (file_id,))
+                if cursor.fetchone():
+                    # Запись существует, но поле aggregation_status может отсутствовать
+                    # Добавляем колонку aggregation_status, если она отсутствует
+                    cursor.execute("PRAGMA table_info(aggregation_files)")
+                    columns = cursor.fetchall()
+                    column_names = [column[1] for column in columns]
+                    
+                    if 'aggregation_status' not in column_names:
+                        cursor.execute("ALTER TABLE aggregation_files ADD COLUMN aggregation_status TEXT")
+                        self.conn.commit()
+                        logging.info("Добавлена колонка aggregation_status в таблицу aggregation_files")
+                        
+                        # Повторяем обновление
+                        cursor.execute(
+                            "UPDATE aggregation_files SET aggregation_status = ? WHERE id = ?",
+                            (aggregation_status, file_id)
+                        )
+                        self.conn.commit()
+                        
+                        if cursor.rowcount > 0:
+                            logging.info(f"Обновлен aggregation_status для файла агрегации с ID {file_id}: {aggregation_status}")
+                            return True
+                    
+                    # Другая причина, возможно несоответствие типов данных
+                    logging.warning(f"Не удалось обновить aggregation_status для файла с ID {file_id}")
+                    return False
+                else:
+                    logging.warning(f"Не найден файл агрегации с ID {file_id} для обновления aggregation_status")
+                    return False
+                    
+        except Exception as e:
+            logging.error(f"Ошибка при обновлении aggregation_status для файла агрегации: {str(e)}")
             return False

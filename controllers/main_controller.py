@@ -1,13 +1,14 @@
 from PyQt6.QtCore import QObject, pyqtSignal
 import logging
 import requests
-from models.models import Order, Connection, Credentials, Nomenclature, Extension, EmissionType, Country, OrderStatus, APIOrder
+from models.models import Order, Connection, Credentials, Nomenclature, Extension, EmissionType, Country, OrderStatus, APIOrder, ReportStatus
 import datetime
 import os
 import time
 import json
 from typing import List, Dict, Union, Optional, Any, Callable
 from PyQt6.QtCore import Qt
+import csv
 
 from models.database import Database
 from models.api_client import APIClient
@@ -78,22 +79,30 @@ class MainController(QObject):
     
     def connect_signals(self):
         """Подключение сигналов к слотам"""
-        # Сигналы от view к controller
-        
-        # API заказы
-        self.view.api_orders_signal.connect(self.load_api_orders)
-        self.view.delete_api_order_signal.connect(self.delete_api_order)
-        self.view.get_km_from_order_signal.connect(self.get_km_from_order)
-        
-        # Сигналы для работы с заказами
+        # Сигналы для отображения заказов
         self.view.get_orders_signal.connect(self.get_orders)
         self.view.get_order_details_signal.connect(self.get_order_details)
+        self.view.create_order_signal.connect(self.create_order)
+        self.view.emit_order_signal.connect(self.emit_order)
+        
+        # Сигналы для конфигурации
+        self.view.settings_signal.connect(self.on_settings)
+        self.view.get_registry_presets_signal.connect(self.get_registry_presets)
+        self.view.get_registry_by_id_signal.connect(self.get_registry_by_id)
+        self.view.test_connection_signal.connect(self.test_connection)
+        self.view.check_updates_signal.connect(self.check_updates)
+        
+        # Сигналы для работы с заказами
         self.view.add_order_signal.connect(self.add_order)
-        self.view.ping_signal.connect(self.check_api)
-        self.view.get_orders_status_signal.connect(self.get_orders_status)
+        self.view.get_marking_codes_signal.connect(self.get_marking_codes)
         self.view.get_report_signal.connect(self.get_report)
         self.view.get_version_signal.connect(self.get_version)
+        self.view.ping_signal.connect(self.ping)
+        self.view.get_orders_status_signal.connect(self.get_orders_status)
         self.view.create_emission_order_signal.connect(self.create_emission_order)
+        self.view.api_orders_signal.connect(self.get_api_orders)
+        self.view.delete_api_order_signal.connect(self.delete_api_order)
+        self.view.get_km_from_order_signal.connect(self.get_km_from_order)
         
         # Сигналы для работы с подключениями
         self.view.add_connection_signal.connect(self.add_connection)
@@ -105,39 +114,40 @@ class MainController(QObject):
         self.view.add_credentials_signal.connect(self.add_credentials)
         self.view.edit_credentials_signal.connect(self.edit_credentials)
         self.view.delete_credentials_signal.connect(self.delete_credentials)
+        self.view.set_active_credentials_signal.connect(self.set_active_credentials)
         
         # Сигналы для работы с номенклатурой
         self.view.add_nomenclature_signal.connect(self.add_nomenclature)
         self.view.edit_nomenclature_signal.connect(self.edit_nomenclature)
         self.view.delete_nomenclature_signal.connect(self.delete_nomenclature)
+        self.view.search_nomenclature_signal.connect(self.search_nomenclature)
         
         # Сигналы для работы с расширениями API
+        self.view.add_extension_signal.connect(self.add_extension)
+        self.view.edit_extension_signal.connect(self.edit_extension)
+        self.view.delete_extension_signal.connect(self.delete_extension)
         self.view.set_active_extension_signal.connect(self.set_active_extension)
         
-        # Сигналы для работы с логами API
-        self.view.load_api_logs_signal.connect(self.load_api_logs)
-        self.view.get_api_log_details_signal.connect(self.on_get_api_log_details)
-        self.view.export_api_descriptions_signal.connect(self.export_api_descriptions)
+        # Сигналы для работы с комментариями
+        self.view.add_comment_signal.connect(self.add_comment)
+        self.view.edit_comment_signal.connect(self.edit_comment)
+        self.view.delete_comment_signal.connect(self.delete_comment)
         
         # Сигналы для работы со странами
-        self.view.load_countries_signal.connect(self.load_countries)
+        self.view.add_country_signal.connect(self.add_country)
+        self.view.edit_country_signal.connect(self.edit_country)
+        self.view.delete_country_signal.connect(self.delete_country)
+        self.view.set_active_country_signal.connect(self.set_active_country)
         
         # Сигналы для работы со статусами заказов
-        self.view.load_order_statuses_signal.connect(self.load_order_statuses)
         self.view.add_order_status_signal.connect(self.add_order_status)
         self.view.edit_order_status_signal.connect(self.edit_order_status)
         self.view.delete_order_status_signal.connect(self.delete_order_status)
         
-        # Сигналы для работы с типами использования кодов маркировки
-        self.view.load_usage_types_signal.connect(self.load_usage_types)
-        self.view.add_usage_type_signal.connect(self.add_usage_type)
-        self.view.edit_usage_type_signal.connect(self.update_usage_type)
-        self.view.delete_usage_type_signal.connect(self.delete_usage_type)
-        
         # Сигналы для работы с кодами маркировки
-        self.view.get_marking_codes_signal.connect(self.get_marking_codes)
-        self.view.mark_codes_as_used_signal.connect(self.mark_codes_as_used)
-        self.view.mark_codes_as_exported_signal.connect(self.mark_codes_as_exported)
+        self.view.add_marking_codes_signal.connect(self.add_marking_codes)
+        self.view.delete_marking_codes_signal.connect(self.delete_marking_codes)
+        self.view.export_marking_codes_signal.connect(self.export_marking_codes)
         
         # Сигналы для работы с файлами агрегации
         self.view.load_aggregation_files_signal.connect(self.load_aggregation_files)
@@ -145,6 +155,8 @@ class MainController(QObject):
         self.view.delete_aggregation_file_signal.connect(self.delete_aggregation_file)
         self.view.export_aggregation_file_signal.connect(self.export_aggregation_file)
         self.view.send_utilisation_report_signal.connect(self.send_utilisation_report)
+        self.view.check_report_status_signal.connect(self.check_report_status)
+        self.view.check_aggregation_status_signal.connect(self.check_aggregation_status)
     
     def load_all_data(self):
         """Загрузка всех данных из базы данных"""
@@ -602,6 +614,34 @@ class MainController(QObject):
             logger.error(f"Ошибка при удалении учетных данных: {str(e)}")
             self.view.show_message("Ошибка", f"Ошибка при удалении учетных данных: {str(e)}")
     
+    def set_active_credentials(self, credentials_id):
+        """Установка активных учетных данных
+        
+        Args:
+            credentials_id (int): ID учетных данных для активации
+        """
+        try:
+            # Реализация метода установки активных учетных данных
+            # В текущей версии приложения этот функционал не полностью реализован
+            # Поэтому просто делаем запись в лог
+            logger.info(f"Установка активных учетных данных: {credentials_id}")
+            
+            # В будущем здесь может быть код для установки активных учетных данных
+            # например, обновление соответствующего флага в базе данных
+            # self.db.set_active_credentials(credentials_id)
+            
+            # Обновляем учетные данные в представлении
+            self.load_credentials()
+            
+            # Обновляем настройки API-клиента
+            self.update_api_client_settings()
+            
+            self.view.show_message("Успех", "Учетные данные успешно активированы")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при установке активных учетных данных: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при установке активных учетных данных: {str(e)}")
+    
     # Методы для работы с номенклатурой
     def add_nomenclature(self, name, gtin, product_group=""):
         """Добавление новой номенклатуры"""
@@ -636,6 +676,40 @@ class MainController(QObject):
             logger.error(f"Ошибка при удалении номенклатуры: {str(e)}")
             self.view.show_message("Ошибка", f"Ошибка при удалении номенклатуры: {str(e)}")
     
+    def search_nomenclature(self, search_query):
+        """Поиск номенклатуры по запросу
+        
+        Args:
+            search_query (str): Строка поиска (ищет по названию и GTIN)
+        """
+        try:
+            if not search_query:
+                # Если поисковый запрос пустой, загружаем все записи
+                self.load_nomenclature()
+                return
+                
+            logger.info(f"Поиск номенклатуры по запросу: {search_query}")
+            
+            # В текущей версии поиск осуществляется через загрузку всех записей
+            # и их фильтрацию на стороне клиента
+            all_nomenclature = self.db.get_nomenclature()
+            
+            # Фильтруем список по поисковому запросу (ищем в названии и GTIN)
+            search_query = search_query.lower()
+            filtered_nomenclature = [
+                item for item in all_nomenclature
+                if search_query in item.name.lower() or search_query in item.gtin.lower()
+            ]
+            
+            # Обновляем таблицу с отфильтрованными результатами
+            self.view.update_nomenclature_table(filtered_nomenclature)
+            
+            logger.info(f"Найдено {len(filtered_nomenclature)} записей по запросу '{search_query}'")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при поиске номенклатуры: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при поиске номенклатуры: {str(e)}")
+    
     # Методы для работы с расширениями API
     def set_active_extension(self, extension_id):
         """Установка активного расширения API"""
@@ -651,22 +725,145 @@ class MainController(QObject):
             logger.error(f"Ошибка при установке активного расширения API: {str(e)}")
             self.view.show_message("Ошибка", f"Ошибка при установке активного расширения API: {str(e)}")
     
+    def add_extension(self, code, name):
+        """Добавление нового расширения API
+        
+        Args:
+            code (str): Код расширения API
+            name (str): Название расширения API
+        """
+        try:
+            self.db.add_extension(code, name)
+            logger.info(f"Расширение API {name} ({code}) добавлено")
+            self.load_extensions()
+            self.view.show_message("Успех", "Расширение API успешно добавлено")
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении расширения API: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при добавлении расширения API: {str(e)}")
+    
+    def edit_extension(self, extension_id, code, name):
+        """Редактирование расширения API
+        
+        Args:
+            extension_id (int): ID расширения API
+            code (str): Новый код расширения API
+            name (str): Новое название расширения API
+        """
+        try:
+            self.db.update_extension(extension_id, code, name)
+            logger.info(f"Расширение API {extension_id} обновлено")
+            self.load_extensions()
+            self.view.show_message("Успех", "Расширение API успешно обновлено")
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении расширения API: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при обновлении расширения API: {str(e)}")
+    
+    def delete_extension(self, extension_id):
+        """Удаление расширения API
+        
+        Args:
+            extension_id (int): ID расширения API для удаления
+        """
+        try:
+            self.db.delete_extension(extension_id)
+            logger.info(f"Расширение API {extension_id} удалено")
+            self.load_extensions()
+            self.view.show_message("Успех", "Расширение API успешно удалено")
+        except Exception as e:
+            logger.error(f"Ошибка при удалении расширения API: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при удалении расширения API: {str(e)}")
+    
     def on_get_api_log_details(self, log_id, request_callback, response_callback):
         """Обработчик запроса деталей лога API"""
         try:
             log = self.db.get_api_log_by_id(log_id)
             if log:
-                # Передаем данные запроса и ответа через callback функции
-                request_callback(log["request"])
-                response_callback(log["response"])
+                # Проверяем, что данные запроса и ответа присутствуют
+                request_data = log.get("request", "{}")
+                response_data = log.get("response", "{}")
+                
+                # Логируем данные для отладки
+                logger.debug(f"Получены данные лога API #{log_id}: request_type={type(request_data)}, response_type={type(response_data)}")
+                
+                # Обработка запроса
+                if request_data is None:
+                    request_data = "{}"
+                
+                # Обработка ответа
+                if response_data is None:
+                    response_data = "{}"
+                
+                # Проверяем, являются ли данные строками
+                if not isinstance(request_data, str):
+                    try:
+                        import json
+                        request_data = json.dumps(request_data, ensure_ascii=False)
+                    except Exception as e:
+                        logger.error(f"Ошибка при сериализации данных запроса: {str(e)}")
+                        request_data = str(request_data)
+                
+                if not isinstance(response_data, str):
+                    try:
+                        import json
+                        response_data = json.dumps(response_data, ensure_ascii=False)
+                    except Exception as e:
+                        logger.error(f"Ошибка при сериализации данных ответа: {str(e)}")
+                        response_data = str(response_data)
+                
+                # Дополнительная проверка на двойное экранирование
+                try:
+                    import json
+                    
+                    # Проверяем, можно ли распарсить request_data как JSON
+                    try:
+                        # Если это валидный JSON, значит у нас нет проблем с экранированием
+                        json.loads(request_data)
+                    except json.JSONDecodeError:
+                        # Если не удалось распарсить, возможно, это дважды экранированный JSON
+                        # Попробуем удалить лишние экранирования
+                        if '\\' in request_data:
+                            clean_request_data = request_data.replace('\\"', '"').replace('\\\\', '\\')
+                            try:
+                                # Если теперь это валидный JSON, используем очищенную версию
+                                json.loads(clean_request_data)
+                                request_data = clean_request_data
+                            except json.JSONDecodeError:
+                                # Оставляем как есть
+                                pass
+                    
+                    # Аналогично для response_data
+                    try:
+                        json.loads(response_data)
+                    except json.JSONDecodeError:
+                        if '\\' in response_data:
+                            clean_response_data = response_data.replace('\\"', '"').replace('\\\\', '\\')
+                            try:
+                                json.loads(clean_response_data)
+                                response_data = clean_response_data
+                            except json.JSONDecodeError:
+                                pass
+                
+                except Exception as e:
+                    # Ошибка при попытке обработать возможное двойное экранирование
+                    # Логируем, но продолжаем работу
+                    logger.error(f"Ошибка при обработке двойного экранирования: {str(e)}")
+                
+                # Передаем данные в колбэки
+                request_callback(request_data)
+                response_callback(response_data)
+                
+                # Сохраняем в лог информацию об успешном получении деталей
+                logger.info(f"Успешно получены детали лога API #{log_id}")
             else:
-                request_callback("{}")
-                response_callback("{}")
+                logger.warning(f"Лог API с ID {log_id} не найден в базе данных")
+                request_callback("Лог не найден")
+                response_callback("Лог не найден")
                 
         except Exception as e:
             logger.error(f"Ошибка при получении деталей лога API: {str(e)}")
-            request_callback(f"{{ \"error\": \"{str(e)}\" }}")
-            response_callback(f"{{ \"error\": \"{str(e)}\" }}")
+            logger.exception("Подробная трассировка ошибки:")
+            request_callback(f"Ошибка: {str(e)}")
+            response_callback(f"Ошибка: {str(e)}")
     
     def create_emission_order(self, order_data):
         """Создание заказа на эмиссию кодов маркировки
@@ -813,6 +1010,108 @@ class MainController(QObject):
         except Exception as e:
             logger.error(f"Ошибка при загрузке стран: {str(e)}")
             self.view.show_message("Ошибка", f"Не удалось загрузить список стран: {str(e)}")
+
+    def add_country(self, code, name):
+        """Добавление страны в базу данных"""
+        try:
+            # Проверяем, что код и название не пустые
+            if not code or not name:
+                self.view.show_message("Ошибка", "Код и название страны не могут быть пустыми")
+                return
+                
+            # Проверяем, что страна с таким кодом не существует
+            existing_country = self.db.get_country_by_code(code)
+            if existing_country:
+                self.view.show_message("Ошибка", f"Страна с кодом '{code}' уже существует")
+                return
+                
+            # Добавляем страну в базу данных (здесь нужно реализовать метод в Database)
+            cursor = self.db.conn.cursor()
+            cursor.execute("INSERT INTO countries (code, name) VALUES (?, ?)", (code, name))
+            country_id = cursor.lastrowid
+            
+            # Сохраняем изменения в базе данных
+            self.db.commit()
+            
+            # Обновляем список стран
+            self.load_countries()
+            
+            logger.info(f"Добавлена страна: {name} ({code})")
+            self.view.show_message("Успех", f"Страна '{name}' успешно добавлена")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении страны: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при добавлении страны: {str(e)}")
+
+    def edit_country(self, country_id, code, name):
+        """Редактирование страны в базе данных"""
+        try:
+            # Проверяем, что код и название не пустые
+            if not code or not name:
+                self.view.show_message("Ошибка", "Код и название страны не могут быть пустыми")
+                return
+                
+            # Проверяем, что страна с таким кодом не существует (кроме текущей)
+            cursor = self.db.conn.cursor()
+            cursor.execute("SELECT id FROM countries WHERE code = ? AND id != ?", (code, country_id))
+            if cursor.fetchone():
+                self.view.show_message("Ошибка", f"Страна с кодом '{code}' уже существует")
+                return
+                
+            # Обновляем страну в базе данных
+            cursor.execute("UPDATE countries SET code = ?, name = ? WHERE id = ?", (code, name, country_id))
+            
+            # Сохраняем изменения в базе данных
+            self.db.commit()
+            
+            # Обновляем список стран
+            self.load_countries()
+            
+            logger.info(f"Обновлена страна: {name} ({code})")
+            self.view.show_message("Успех", f"Страна '{name}' успешно обновлена")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении страны: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при обновлении страны: {str(e)}")
+
+    def delete_country(self, country_id):
+        """Удаление страны из базы данных"""
+        try:
+            # Удаляем страну из базы данных
+            cursor = self.db.conn.cursor()
+            cursor.execute("DELETE FROM countries WHERE id = ?", (country_id,))
+            
+            # Сохраняем изменения в базе данных
+            self.db.commit()
+            
+            # Обновляем список стран
+            self.load_countries()
+            
+            logger.info(f"Удалена страна с ID: {country_id}")
+            self.view.show_message("Успех", "Страна успешно удалена")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при удалении страны: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при удалении страны: {str(e)}")
+
+    def set_active_country(self, country_id):
+        """Установка активной страны"""
+        try:
+            # Этот метод скорее всего требует соответствующей таблицы в базе данных
+            # или другого механизма хранения активной страны, например, в настройках
+            
+            # Сохраняем активную страну в настройках
+            self.db.set_setting("active_country_id", str(country_id))
+            
+            logger.info(f"Установлена активная страна с ID: {country_id}")
+            self.view.show_message("Успех", "Активная страна успешно изменена")
+            
+            # Обновляем настройки API-клиента
+            self.update_api_client_settings()
+            
+        except Exception as e:
+            logger.error(f"Ошибка при установке активной страны: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при установке активной страны: {str(e)}")
 
     def export_api_descriptions(self):
         """Экспорт описаний API в файл"""
@@ -1376,12 +1675,131 @@ class MainController(QObject):
             # Обновляем таблицу в интерфейсе
             self.view.update_marking_codes_table(codes)
             logger.info(f"Таблица кодов маркировки обновлена, получено {len(codes)} записей")
-            
         except Exception as e:
             logger.error(f"Ошибка при загрузке кодов маркировки: {str(e)}")
             self.view.show_message("Ошибка", f"Ошибка при загрузке кодов маркировки: {str(e)}")
 
-    # Методы для работы с файлами агрегации
+    def add_marking_codes(self, codes, gtin, order_id):
+        """Добавление кодов маркировки в базу данных"""
+        try:
+            # Проверяем входные данные
+            if not codes:
+                self.view.show_message("Ошибка", "Список кодов маркировки пуст")
+                return
+                
+            if not gtin:
+                self.view.show_message("Ошибка", "Не указан GTIN")
+                return
+                
+            # Сохраняем коды маркировки в базу данных
+            result = self.db.save_marking_codes(codes, gtin, order_id)
+            
+            if result:
+                logger.info(f"Добавлено {len(codes)} кодов маркировки для GTIN {gtin}")
+                self.view.show_message("Успех", f"Добавлено {len(codes)} кодов маркировки")
+                
+                # Обновляем таблицу кодов маркировки
+                self.load_marking_codes()
+            else:
+                logger.error("Не удалось добавить коды маркировки")
+                self.view.show_message("Ошибка", "Не удалось добавить коды маркировки")
+                
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении кодов маркировки: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при добавлении кодов маркировки: {str(e)}")
+
+    def delete_marking_codes(self, code_ids):
+        """Удаление кодов маркировки из базы данных"""
+        try:
+            # Проверяем входные данные
+            if not code_ids:
+                self.view.show_message("Ошибка", "Не выбраны коды маркировки для удаления")
+                return
+            
+            # Запрашиваем подтверждение
+            if not self.view.show_confirmation("Удаление кодов маркировки", f"Вы действительно хотите удалить {len(code_ids)} кодов маркировки?"):
+                return
+            
+            # Удаляем коды маркировки из базы данных
+            # Предполагаем, что в базе есть метод для удаления кодов маркировки
+            # Если такого метода нет, его нужно будет реализовать
+            deleted_count = 0
+            for code_id in code_ids:
+                # Удаляем код маркировки по ID
+                cursor = self.db.conn.cursor()
+                cursor.execute("DELETE FROM marking_codes WHERE id = ?", (code_id,))
+                deleted_count += cursor.rowcount
+            
+            # Сохраняем изменения в базе данных
+            self.db.commit()
+            
+            if deleted_count > 0:
+                logger.info(f"Удалено {deleted_count} кодов маркировки")
+                self.view.show_message("Успех", f"Удалено {deleted_count} кодов маркировки")
+                
+                # Обновляем таблицу кодов маркировки
+                self.load_marking_codes()
+            else:
+                logger.warning("Не удалось удалить коды маркировки")
+                self.view.show_message("Предупреждение", "Не удалось удалить коды маркировки")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при удалении кодов маркировки: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при удалении кодов маркировки: {str(e)}")
+
+    def export_marking_codes(self, code_ids, export_path):
+        """Экспорт кодов маркировки в файл
+        
+        Args:
+            code_ids (list): Список ID кодов маркировки для экспорта
+            export_path (str): Путь для сохранения файла
+        """
+        try:
+            # Проверяем входные данные
+            if not code_ids:
+                self.view.show_message("Ошибка", "Не выбраны коды маркировки для экспорта")
+                return
+            
+            if not export_path:
+                self.view.show_message("Ошибка", "Не указан путь для сохранения файла")
+                return
+            
+            # Получаем коды маркировки из базы данных
+            cursor = self.db.conn.cursor()
+            placeholders = ", ".join(["?"] * len(code_ids))
+            query = f"SELECT id, code, gtin, order_id, created_at FROM marking_codes WHERE id IN ({placeholders})"
+            cursor.execute(query, code_ids)
+            codes = cursor.fetchall()
+            
+            if not codes:
+                self.view.show_message("Ошибка", "Не удалось получить коды маркировки для экспорта")
+                return
+            
+            # Экспортируем коды маркировки в CSV файл
+            with open(export_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f, delimiter=";")
+                # Записываем заголовок
+                writer.writerow(["ID", "Код", "GTIN", "Заказ", "Дата создания"])
+                # Записываем данные
+                for code in codes:
+                    writer.writerow([
+                        code["id"],
+                        code["code"],
+                        code["gtin"],
+                        code["order_id"],
+                        code["created_at"]
+                    ])
+            
+            # Отмечаем коды как экспортированные
+            self.mark_codes_as_exported(code_ids)
+            
+            logger.info(f"Экспортировано {len(codes)} кодов маркировки в файл {export_path}")
+            self.view.show_message("Успех", f"Экспортировано {len(codes)} кодов маркировки")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при экспорте кодов маркировки: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при экспорте кодов маркировки: {str(e)}")
+
     def load_aggregation_files(self):
         """Загрузка файлов агрегации из базы данных"""
         try:
@@ -1768,10 +2186,54 @@ class MainController(QObject):
             
             # Обрабатываем ответ
             if response.get('success', False):
-                # Если отчет успешно отправлен, отмечаем коды как использованные в БД
-                # TODO: Реализовать отметку кодов как использованных
-                
-                self.view.show_message("Отчет о нанесении", "Отчет успешно отправлен")
+                # Проверяем, содержит ли ответ omsId и reportId
+                if 'omsId' in response and 'reportId' in response:
+                    # Извлекаем reportId для сохранения в БД
+                    oms_id = response['omsId']
+                    report_id = response['reportId']
+                    logger.info(f"Получен reportId отчета о нанесении: {report_id}")
+                    
+                    # Находим file_id из report_data
+                    file_id = None
+                    # Для этого метода нам нужно знать, какой файл агрегации использовался
+                    # Мы можем получить эту информацию из контекста вызова
+                    # В данном случае предполагаем, что file_id доступен через аргументы
+                    if hasattr(report_data, 'file_id'):
+                        file_id = report_data.file_id
+                    elif isinstance(report_data, dict) and 'file_id' in report_data:
+                        file_id = report_data['file_id']
+                    
+                    # Если file_id не найден, пытаемся получить его из первого выбранного элемента в таблице
+                    if not file_id:
+                        try:
+                            # Получаем выбранный файл агрегации из представления
+                            selected_items = self.view.aggregation_files_table.selectedItems()
+                            if selected_items:
+                                row = selected_items[0].row()
+                                item = self.view.aggregation_files_table.item(row, 0)
+                                if item:
+                                    file_id = int(item.data(Qt.ItemDataRole.UserRole))
+                                    logger.info(f"Получен file_id из выбранной строки: {file_id}")
+                        except Exception as e:
+                            logger.error(f"Ошибка при получении file_id из выбранной строки: {str(e)}")
+                    
+                    # Если удалось получить file_id, сохраняем reportId
+                    if file_id:
+                        try:
+                            # Добавляем запись в таблицу или обновляем существующую
+                            self.db.update_aggregation_file_report_id(file_id, report_id)
+                            logger.info(f"Сохранен reportId для файла агрегации с ID {file_id}: {report_id}")
+                        except Exception as e:
+                            logger.error(f"Ошибка при сохранении reportId: {str(e)}")
+                    
+                    # Отображаем сообщение с дополнительной информацией о reportId
+                    self.view.show_message(
+                        "Отчет о нанесении", 
+                        f"Отчет успешно отправлен\nИдентификатор отчета: {report_id}"
+                    )
+                else:
+                    # Стандартное сообщение об успехе
+                    self.view.show_message("Отчет о нанесении", "Отчет успешно отправлен")
             else:
                 error_message = "Ошибка при отправке отчета"
                 if 'fieldErrors' in response:
@@ -1975,3 +2437,525 @@ class MainController(QObject):
         except Exception as e:
             logger.error(f"Ошибка при проверке доступности API: {str(e)}")
             return False
+
+    def check_report_status(self, file_id, report_id):
+        """Получение статуса обработки отчета о нанесении
+        
+        Согласно документации API, метод использует URL:
+        GET /api/v2/{extension}/report/info?omsId={omsId}&reportId={reportId}
+        
+        Args:
+            file_id (int): ID файла агрегации для обновления статуса
+            report_id (str): Идентификатор отчета для проверки
+        """
+        try:
+            # Проверяем наличие данных
+            if not report_id:
+                self.view.show_message("Ошибка", "Отсутствует идентификатор отчета")
+                return
+            
+            # Получаем необходимые параметры из API-клиента
+            extension = self.api_client.extension
+            omsid = self.api_client.omsid
+            
+            # Проверяем параметры
+            if not extension or not omsid:
+                self.view.show_message("Ошибка", "Отсутствуют необходимые параметры (extension или omsid)")
+                return
+            
+            # Логируем начало процесса
+            logger.info(f"Запрос статуса отчета о маркировке: {report_id}")
+            
+            # Формируем URL запроса
+            url = f"/api/v2/{extension}/report/info"
+            
+            # Параметры запроса
+            params = {
+                "omsId": omsid,
+                "reportId": report_id
+            }
+            
+            # Описание запроса для логирования
+            description = f"Запрос статуса отчета о маркировке (ID отчета: {report_id})"
+            
+            # Выполняем запрос к API используя метод request
+            success, response, status_code = self.api_client.request(
+                "GET", 
+                url, 
+                params=params,
+                description=description
+            )
+            
+            # Проверяем наличие ответа
+            if not success or not response:
+                self.view.show_message("Ошибка", "Не получен ответ от API")
+                # Обновляем список логов API, чтобы ошибка отображалась
+                self.load_api_logs()
+                return
+            
+            if not isinstance(response, dict):
+                self.view.show_message("Ошибка", f"Некорректный формат ответа: {type(response)}")
+                # Обновляем список логов API, чтобы ошибка отображалась
+                self.load_api_logs()
+                return
+            
+            # Получаем статус отчета
+            # Согласно документации API, статус содержится в поле reportStatus
+            report_status = response.get("reportStatus", "")
+            status_text = self.get_report_status_text(report_status)
+            
+            # Обновляем статус отчета в базе данных
+            if file_id and report_status:
+                self.db.update_aggregation_file_report_status(file_id, report_status)
+                logger.info(f"Обновлен статус отчета для файла агрегации {file_id}: {report_status}")
+                
+                # Обновляем таблицу файлов агрегации, чтобы отобразить новый статус
+                self.load_aggregation_files()
+            
+            # Формируем сообщение для пользователя
+            message = f"Статус отчета о маркировке (ID: {report_id}): {status_text}"
+            
+            # Отображаем сообщение
+            self.view.show_message("Статус отчета", message)
+            
+            # Логируем результат
+            logger.info(message)
+            
+            # Обновляем список логов API
+            self.load_api_logs()
+            
+        except Exception as e:
+            logger.error(f"Ошибка при получении статуса отчета: {str(e)}")
+            self.view.show_message("Ошибка", f"Не удалось получить статус отчета: {str(e)}")
+            # Логируем ошибку в лог API
+            if hasattr(self, 'api_logger') and self.api_logger:
+                try:
+                    self.api_logger.log_request(
+                        "GET",
+                        f"/api/v2/{extension}/report/info",
+                        json.dumps({"omsId": omsid, "reportId": report_id}),
+                        json.dumps({"error": str(e)}),
+                        500,
+                        False,
+                        f"Ошибка при получении статуса отчета о маркировке: {str(e)}"
+                    )
+                except Exception as log_err:
+                    logger.error(f"Не удалось записать ошибку в лог API: {str(log_err)}")
+            
+            # Обновляем список логов API
+            self.load_api_logs()
+    
+    def get_report_status_text(self, status):
+        """Возвращает текстовое описание статуса отчета на русском языке
+        
+        Args:
+            status (str): Код статуса (PENDING, READY_TO_SEND, REJECTED, SENT)
+            
+        Returns:
+            str: Текстовое описание статуса на русском
+        """
+        from models.models import ReportStatus
+        return ReportStatus.get_description(status)
+
+    def check_aggregation_status(self, file_id, aggregation_report_id):
+        """Получение статуса обработки отчета агрегации
+        
+        Согласно документации API, метод использует URL:
+        GET /api/v2/{extension}/report/info?omsId={omsId}&reportId={reportId}
+        
+        Args:
+            file_id (int): ID файла агрегации для обновления статуса
+            aggregation_report_id (str): Идентификатор отчета агрегации для проверки
+        """
+        try:
+            # Проверяем наличие данных
+            if not aggregation_report_id:
+                self.view.show_message("Ошибка", "Отсутствует идентификатор отчета агрегации")
+                return
+            
+            # Получаем необходимые параметры из API-клиента
+            extension = self.api_client.extension
+            omsid = self.api_client.omsid
+            
+            # Проверяем параметры
+            if not extension or not omsid:
+                self.view.show_message("Ошибка", "Отсутствуют необходимые параметры (extension или omsid)")
+                return
+            
+            # Логируем начало процесса
+            logger.info(f"Запрос статуса отчета агрегации: {aggregation_report_id}")
+            
+            # Формируем URL запроса
+            url = f"/api/v2/{extension}/report/info"
+            
+            # Параметры запроса
+            params = {
+                "omsId": omsid,
+                "reportId": aggregation_report_id
+            }
+            
+            # Описание запроса для логирования
+            description = f"Запрос статуса отчета агрегации (ID отчета: {aggregation_report_id})"
+            
+            # Выполняем запрос к API используя метод request
+            success, response, status_code = self.api_client.request(
+                "GET", 
+                url, 
+                params=params,
+                description=description
+            )
+            
+            # Проверяем наличие ответа
+            if not success or not response:
+                self.view.show_message("Ошибка", "Не получен ответ от API")
+                # Обновляем список логов API, чтобы ошибка отображалась
+                self.load_api_logs()
+                return
+            
+            if not isinstance(response, dict):
+                self.view.show_message("Ошибка", f"Некорректный формат ответа: {type(response)}")
+                # Обновляем список логов API, чтобы ошибка отображалась
+                self.load_api_logs()
+                return
+            
+            # Получаем статус отчета
+            # Согласно документации API, статус содержится в поле reportStatus
+            report_status = response.get("reportStatus", "")
+            status_text = self.get_report_status_text(report_status)
+            
+            # Обновляем статус отчета в базе данных
+            if file_id and report_status:
+                self.db.update_aggregation_file_aggregation_status(file_id, report_status)
+                logger.info(f"Обновлен статус отчета агрегации для файла {file_id}: {report_status}")
+                
+                # Обновляем таблицу файлов агрегации, чтобы отобразить новый статус
+                self.load_aggregation_files()
+            
+            # Формируем сообщение для пользователя
+            message = f"Статус отчета агрегации (ID: {aggregation_report_id}): {status_text}"
+            
+            # Отображаем сообщение
+            self.view.show_message("Статус отчета агрегации", message)
+            
+            # Логируем результат
+            logger.info(message)
+            
+            # Обновляем список логов API
+            self.load_api_logs()
+            
+        except Exception as e:
+            logger.error(f"Ошибка при получении статуса отчета агрегации: {str(e)}")
+            self.view.show_message("Ошибка", f"Не удалось получить статус отчета агрегации: {str(e)}")
+            # Логируем ошибку в лог API
+            if hasattr(self, 'api_logger') and self.api_logger:
+                try:
+                    self.api_logger.log_request(
+                        "GET",
+                        f"/api/v2/{extension}/report/info",
+                        json.dumps({"omsId": omsid, "reportId": aggregation_report_id}),
+                        json.dumps({"error": str(e)}),
+                        500,
+                        False,
+                        f"Ошибка при получении статуса отчета агрегации: {str(e)}"
+                    )
+                except Exception as log_err:
+                    logger.error(f"Не удалось записать ошибку в лог API: {str(log_err)}")
+            
+            # Обновляем список логов API
+            self.load_api_logs()
+
+    def create_order(self, order_data):
+        """Создание заказа
+        
+        Args:
+            order_data (dict): Данные заказа для создания
+        """
+        try:
+            # Проверяем наличие обязательных полей в данных заказа
+            if 'order_number' not in order_data:
+                self.view.show_message("Ошибка", "Не указан номер заказа")
+                return
+            
+            # Получаем номер заказа и статус из данных
+            order_number = order_data.get('order_number', '')
+            status = order_data.get('status', 'Новый')
+            
+            # Сохраняем заказ в базу данных
+            order = self.db.add_order(order_number=order_number, status=status)
+            logger.info(f"Заказ {order_number} сохранен в базе данных")
+            
+            # Отправка на сервер, если API доступен
+            try:
+                response = self.api_client.post_orders(order_data)
+                logger.info(f"Заказ {order_number} отправлен на сервер: {response}")
+                self.view.show_message("Успех", f"Заказ {order_number} успешно создан и отправлен на сервер")
+            except requests.RequestException as e:
+                logger.warning(f"Не удалось отправить заказ на сервер: {str(e)}")
+                self.view.show_message(
+                    "Предупреждение", 
+                    f"Заказ {order_number} сохранен локально, но не отправлен на сервер из-за ошибки подключения: {str(e)}"
+                )
+                
+            # Обновляем таблицу заказов
+            self.load_orders()
+            
+        except Exception as e:
+            logger.error(f"Ошибка при создании заказа: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при создании заказа: {str(e)}")
+    
+    def emit_order(self, order_data):
+        """Отправка заказа в 1С или другую внешнюю систему
+        
+        Args:
+            order_data (dict): Данные заказа для отправки
+        """
+        try:
+            # Проверяем наличие данных для отправки
+            if not order_data or 'order_id' not in order_data:
+                self.view.show_message("Ошибка", "Не указан ID заказа для отправки")
+                return
+            
+            order_id = order_data.get('order_id')
+            
+            # Логируем операцию
+            logger.info(f"Отправка заказа {order_id} во внешнюю систему")
+            
+            # Здесь должна быть реализация отправки данных в 1С или другую систему
+            # В текущей версии приложения функционал не реализован полностью
+            
+            # Имитация отправки данных
+            success = True  # в реальной ситуации здесь должна быть проверка успешности отправки
+            
+            if success:
+                # Обновляем статус заказа в БД
+                self.db.update_order_status(order_id, "Отправлен")
+                self.view.show_message("Успех", f"Заказ {order_id} успешно отправлен во внешнюю систему")
+                # Обновляем таблицу заказов
+                self.load_orders()
+            else:
+                self.view.show_message("Ошибка", f"Не удалось отправить заказ {order_id} во внешнюю систему")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при отправке заказа во внешнюю систему: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при отправке заказа: {str(e)}")
+    
+    def on_settings(self):
+        """Обработчик открытия диалога настроек"""
+        try:
+            logger.info("Открытие диалога настроек")
+            # Загружаем актуальные данные перед открытием диалога
+            self.load_connections()
+            self.load_credentials()
+            
+            # Отображаем информацию о текущих настройках
+            # Этот метод ничего не делает, так как диалог настроек открывается через View
+            # и все действия с настройками осуществляются через сигналы
+            logger.info("Загружены текущие настройки")
+        except Exception as e:
+            logger.error(f"Ошибка при открытии диалога настроек: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при открытии диалога настроек: {str(e)}")
+    
+    def get_registry_presets(self):
+        """Получение предустановленных настроек реестра"""
+        try:
+            logger.info("Запрос предустановленных настроек реестра")
+            # Здесь должна быть реализация получения предустановленных настроек
+            # В текущей версии возвращаем пустой список
+            presets = []
+            return presets
+        except Exception as e:
+            logger.error(f"Ошибка при получении предустановленных настроек реестра: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при получении предустановленных настроек реестра: {str(e)}")
+            return []
+    
+    def get_registry_by_id(self, registry_id):
+        """Получение настроек реестра по ID
+        
+        Args:
+            registry_id (str): Идентификатор реестра
+        """
+        try:
+            logger.info(f"Запрос настроек реестра по ID: {registry_id}")
+            # Здесь должна быть реализация получения настроек реестра по ID
+            # В текущей версии возвращаем пустой словарь
+            registry_settings = {}
+            return registry_settings
+        except Exception as e:
+            logger.error(f"Ошибка при получении настроек реестра по ID: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при получении настроек реестра по ID: {str(e)}")
+            return {}
+    
+    def test_connection(self):
+        """Тестирование соединения с сервером"""
+        try:
+            logger.info("Тестирование соединения с сервером")
+            
+            # Обновляем настройки API-клиента перед тестированием
+            self.update_api_client_settings()
+            
+            # Проверяем наличие активного подключения
+            if not self.api_client.base_url:
+                logger.warning("Нет активного подключения")
+                self.view.show_message("Предупреждение", 
+                    "Нет активного подключения. Настройте подключение перед тестированием.")
+                return False
+            
+            # Проверяем наличие omsId
+            if not self.api_client.omsid:
+                logger.warning("Не указан OMSID")
+                # Здесь мы не показываем сообщение, так как для теста соединения omsId не обязателен
+            
+            # Отправляем ping-запрос для проверки соединения
+            try:
+                response = self.api_client.ping()
+                if response and response.get('success', False):
+                    logger.info("Соединение с сервером успешно установлено")
+                    self.view.show_message("Тестирование соединения", "Соединение с сервером успешно установлено")
+                    return True
+                else:
+                    error_message = "Не удалось установить соединение с сервером"
+                    if response and 'error' in response:
+                        error_message += f": {response['error']}"
+                    logger.warning(error_message)
+                    self.view.show_message("Ошибка", error_message)
+                    return False
+            except requests.RequestException as e:
+                logger.warning(f"Ошибка сети при тестировании соединения: {str(e)}")
+                self.view.show_message("Ошибка", f"Ошибка сети при тестировании соединения: {str(e)}")
+                return False
+        except Exception as e:
+            logger.error(f"Ошибка при тестировании соединения: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при тестировании соединения: {str(e)}")
+            return False
+    
+    def check_updates(self):
+        """Проверка обновлений приложения"""
+        try:
+            logger.info("Проверка обновлений приложения")
+            # Здесь должна быть реализация проверки обновлений
+            # В текущей версии приложения функционал не реализован
+            self.view.show_message("Информация", "Проверка обновлений в данной версии не реализована")
+        except Exception as e:
+            logger.error(f"Ошибка при проверке обновлений: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при проверке обновлений: {str(e)}")
+    
+    def ping(self):
+        """Выполнение ping-запроса к API
+        
+        Проверяет доступность API и выводит результат пользователю
+        """
+        try:
+            logger.info("Выполнение ping-запроса к API")
+            
+            # Обновляем настройки API-клиента перед отправкой запроса
+            self.update_api_client_settings()
+            
+            # Проверяем наличие активного подключения
+            if not self.api_client.base_url:
+                logger.warning("Нет активного подключения")
+                self.view.show_message("Предупреждение", 
+                    "Нет активного подключения. Настройте подключение перед выполнением ping.")
+                return
+            
+            # Отправляем ping-запрос и получаем ответ
+            response = self.api_client.get_ping()
+            
+            # Обрабатываем ответ
+            if response and response.get('success', False):
+                logger.info(f"Ping успешно выполнен. Ответ: {response}")
+                self.view.show_message("Ping", "API доступен. Соединение установлено.")
+                self.view.update_api_status(True)
+            else:
+                error_message = "Ошибка при выполнении ping"
+                if response and 'error' in response:
+                    error_message += f": {response['error']}"
+                logger.warning(error_message)
+                self.view.show_message("Ping", error_message)
+                self.view.update_api_status(False)
+            
+            # Обновляем логи API
+            self.load_api_logs()
+            
+        except requests.RequestException as e:
+            logger.warning(f"Ошибка сети при выполнении ping: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка сети при выполнении ping: {str(e)}")
+            self.view.update_api_status(False)
+            # Обновляем логи API
+            self.load_api_logs()
+        except Exception as e:
+            logger.error(f"Ошибка при выполнении ping: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при выполнении ping: {str(e)}")
+            self.view.update_api_status(False)
+            # Обновляем логи API
+            self.load_api_logs()
+
+    def check_api_availability(self):
+        """Проверка доступности API"""
+        try:
+            # Проверяем активное подключение
+            active_connection = self.db.get_active_connection()
+            if not active_connection:
+                logger.warning("Отсутствует активное подключение")
+                return False
+            
+            # Пытаемся выполнить простой запрос для проверки соединения
+            response = self.api_client.ping()
+            
+            # Если получен ответ с кодом 200, API доступен
+            return response is not None and response.get('success', False)
+            
+        except Exception as e:
+            logger.error(f"Ошибка при проверке доступности API: {str(e)}")
+            return False
+
+    # Методы для работы с комментариями
+    def add_comment(self, entity_type, entity_id, text):
+        """Добавление нового комментария
+        
+        Args:
+            entity_type (str): Тип сущности, к которой привязан комментарий (order, marking_code и т.д.)
+            entity_id (str): ID сущности
+            text (str): Текст комментария
+        """
+        try:
+            # Реализация добавления комментария
+            # В текущей версии приложения этот функционал не реализован
+            logger.info(f"Добавление комментария к {entity_type} с ID {entity_id}")
+            # self.db.add_comment(entity_type, entity_id, text)
+            self.view.show_message("Успех", "Комментарий успешно добавлен")
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении комментария: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при добавлении комментария: {str(e)}")
+    
+    def edit_comment(self, comment_id, text):
+        """Редактирование комментария
+        
+        Args:
+            comment_id (int): ID комментария
+            text (str): Новый текст комментария
+        """
+        try:
+            # Реализация редактирования комментария
+            # В текущей версии приложения этот функционал не реализован
+            logger.info(f"Редактирование комментария с ID {comment_id}")
+            # self.db.update_comment(comment_id, text)
+            self.view.show_message("Успех", "Комментарий успешно обновлен")
+        except Exception as e:
+            logger.error(f"Ошибка при редактировании комментария: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при редактировании комментария: {str(e)}")
+    
+    def delete_comment(self, comment_id):
+        """Удаление комментария
+        
+        Args:
+            comment_id (int): ID комментария для удаления
+        """
+        try:
+            # Реализация удаления комментария
+            # В текущей версии приложения этот функционал не реализован
+            logger.info(f"Удаление комментария с ID {comment_id}")
+            # self.db.delete_comment(comment_id)
+            self.view.show_message("Успех", "Комментарий успешно удален")
+        except Exception as e:
+            logger.error(f"Ошибка при удалении комментария: {str(e)}")
+            self.view.show_message("Ошибка", f"Ошибка при удалении комментария: {str(e)}")

@@ -632,6 +632,16 @@ class APIClient:
             
             # Проверяем наличие ошибок в ответе
             json_response = response.json()
+            
+            # Проверяем успешность отправки отчета (особая обработка для отчетов о нанесении)
+            # Успешный ответ содержит omsId и reportId, а не поле success
+            if ("omsId" in json_response and "reportId" in json_response):
+                # Это успешный ответ при отправке отчета о нанесении
+                logger.info(f"Отчет о нанесении успешно отправлен. OMS ID: {json_response['omsId']}, Report ID: {json_response['reportId']}")
+                # Добавляем флаг success для унификации обработки
+                json_response["success"] = True
+                return json_response
+            
             if not response.ok or not json_response.get("success", False):
                 error_message = "Ошибка при отправке отчета о нанесении: "
                 if "fieldErrors" in json_response:

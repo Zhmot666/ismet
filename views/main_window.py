@@ -55,22 +55,36 @@ class MainWindow(QMainWindow):
     add_credentials_signal = pyqtSignal(str, str, str, str)  # omsid, token, gln, connection_id
     edit_credentials_signal = pyqtSignal(int, str, str, str)  # id, omsid, token, gln
     delete_credentials_signal = pyqtSignal(int)
+    set_active_credentials_signal = pyqtSignal(int)  # id
     
     # Сигналы для работы с номенклатурой
     add_nomenclature_signal = pyqtSignal(str, str, str)  # name, gtin, product_group
     edit_nomenclature_signal = pyqtSignal(int, str, str, str)  # id, name, gtin, product_group
     delete_nomenclature_signal = pyqtSignal(int)
+    search_nomenclature_signal = pyqtSignal(str)  # search_query
     
     # Сигналы для работы с расширениями API
     set_active_extension_signal = pyqtSignal(int)
+    add_extension_signal = pyqtSignal(str, str)  # code, name
+    edit_extension_signal = pyqtSignal(int, str, str)  # id, code, name
+    delete_extension_signal = pyqtSignal(int)  # id
     
     # Сигналы для работы с логами API
     load_api_logs_signal = pyqtSignal()
     get_api_log_details_signal = pyqtSignal(int, object, object)  # id, callback_request, callback_response
     export_api_descriptions_signal = pyqtSignal()  # Сигнал для экспорта описаний API в файл
     
+    # Сигналы для работы с комментариями
+    add_comment_signal = pyqtSignal(str, str)  # entity_type, entity_id, text
+    edit_comment_signal = pyqtSignal(int, str)  # comment_id, text
+    delete_comment_signal = pyqtSignal(int)  # comment_id
+    
     # Сигналы для работы со странами
     load_countries_signal = pyqtSignal()
+    add_country_signal = pyqtSignal(str, str)  # code, name
+    edit_country_signal = pyqtSignal(int, str, str)  # id, code, name
+    delete_country_signal = pyqtSignal(int)  # id
+    set_active_country_signal = pyqtSignal(int)  # id
     
     # Сигналы для работы со статусами заказов
     load_order_statuses_signal = pyqtSignal()
@@ -87,6 +101,9 @@ class MainWindow(QMainWindow):
     # Сигналы для работы с кодами маркировки
     mark_codes_as_used_signal = pyqtSignal(list)  # code_ids
     mark_codes_as_exported_signal = pyqtSignal(list)  # code_ids
+    add_marking_codes_signal = pyqtSignal(list, str, str)  # codes, gtin, order_id
+    delete_marking_codes_signal = pyqtSignal(list)  # code_ids
+    export_marking_codes_signal = pyqtSignal(list, str)  # code_ids, export_path
     
     # Сигналы для работы с файлами агрегации
     load_aggregation_files_signal = pyqtSignal()  # Сигнал для загрузки файлов агрегации
@@ -94,11 +111,16 @@ class MainWindow(QMainWindow):
     delete_aggregation_file_signal = pyqtSignal(int)  # file_id
     export_aggregation_file_signal = pyqtSignal(int, str)  # file_id, export_path
     send_utilisation_report_signal = pyqtSignal(dict)  # data
+    check_report_status_signal = pyqtSignal(int, str)  # file_id, report_id
+    check_aggregation_status_signal = pyqtSignal(int, str)  # file_id, aggregation_report_id
     
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Управление заказами")
         self.setMinimumSize(800, 600)
+        
+        # Настройка для запуска в полноэкранном режиме
+        self.showMaximized()
         
         # Создаем виджет с вкладками
         self.tabs = QTabWidget()
@@ -349,61 +371,115 @@ class MainWindow(QMainWindow):
     
     def on_api_log_selected(self):
         """Обработчик выбора лога API в таблице"""
-        selected_rows = self.api_logs_table.selectedItems()
-        if selected_rows:
+        try:
+            selected_rows = self.api_logs_table.selectedItems()
+            if not selected_rows:
+                return
+                
             row = selected_rows[0].row()
             log_id = int(self.api_logs_table.item(row, 0).text())
             
-            # Используем сигнал для получения деталей лога API
-            # Передаем callback функции для обработки результата
+            # Попробуем сначала получить данные из скрытых ячеек таблицы
+            request_data = self.api_logs_table.item(row, 7).text() if self.api_logs_table.item(row, 7) else "{}"
+            response_data = self.api_logs_table.item(row, 8).text() if self.api_logs_table.item(row, 8) else "{}"
+            
+            # Обновляем поля с деталями запроса и ответа напрямую
+            self.update_request_details(request_data)
+            self.update_response_details(response_data)
+            
+            # В дополнение к этому также запрашиваем данные из базы данных
+            # для получения наиболее актуальной информации
             self.get_api_log_details_signal.emit(
                 log_id, 
                 lambda data: self.update_request_details(data), 
                 lambda data: self.update_response_details(data)
             )
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Ошибка при выборе лога API: {str(e)}")
+            self.request_details.setPlainText(f"Ошибка при загрузке деталей запроса: {str(e)}")
+            self.response_details.setPlainText(f"Ошибка при загрузке деталей ответа: {str(e)}")
     
     def update_request_details(self, request_json):
         """Обновление деталей запроса"""
         try:
-            request_data = json.loads(request_json)
-            
-            # Форматирование запроса
-            request_formatted = ""
-            if 'headers' in request_data and request_data['headers']:
-                request_formatted += "Заголовки запроса:\n"
-                for header, value in request_data['headers'].items():
-                    request_formatted += f"{header}: {value}\n"
-            
-            if 'data' in request_data and request_data['data']:
-                request_formatted += "\nДанные запроса:\n"
-                request_formatted += json.dumps(request_data['data'], ensure_ascii=False, indent=4)
+            # Проверяем, не пустой ли запрос
+            if not request_json or request_json == "{}" or request_json == "null":
+                self.request_details.setPlainText("Нет данных запроса")
+                return
+                
+            # Пробуем сначала сделать JSON красивым, если это возможно
+            try:
+                # Проверяем, является ли запрос JSON-строкой
+                if isinstance(request_json, str):
+                    # Удаляем лишние экранирования, которые могут помешать парсингу
+                    clean_request_json = request_json.replace('\\"', '"').replace('\\\\', '\\')
+                    try:
+                        request_data = json.loads(clean_request_json)
+                        request_formatted = json.dumps(request_data, ensure_ascii=False, indent=4)
+                    except json.JSONDecodeError:
+                        # Если не удалось распарсить JSON, выводим как есть
+                        request_formatted = clean_request_json
+                else:
+                    # Если запрос не строка, а уже словарь/список
+                    request_formatted = json.dumps(request_json, ensure_ascii=False, indent=4)
+            except Exception as e:
+                # Любая другая ошибка - просто выводим как строку
+                request_formatted = str(request_json)
             
             # Устанавливаем текст в многострочное текстовое поле
             self.request_details.setPlainText(request_formatted)
             
         except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
             error_message = f"Ошибка форматирования запроса: {str(e)}"
-            print(error_message)
+            logger.error(error_message)
             self.request_details.setPlainText(f"{error_message}\n\nИсходные данные:\n{request_json}")
     
     def update_response_details(self, response_json):
         """Обновление деталей ответа"""
         try:
-            response_data = json.loads(response_json)
-            
-            # Форматирование ответа
-            response_formatted = json.dumps(response_data, ensure_ascii=False, indent=4)
+            # Проверяем, не пустой ли ответ
+            if not response_json or response_json == "{}" or response_json == "null":
+                self.response_details.setPlainText("Нет данных ответа")
+                return
+                
+            # Пробуем сначала сделать JSON красивым, если это возможно
+            try:
+                # Проверяем, является ли ответ JSON-строкой
+                if isinstance(response_json, str):
+                    # Удаляем лишние экранирования, которые могут помешать парсингу
+                    clean_response_json = response_json.replace('\\"', '"').replace('\\\\', '\\')
+                    try:
+                        response_data = json.loads(clean_response_json)
+                        response_formatted = json.dumps(response_data, ensure_ascii=False, indent=4)
+                    except json.JSONDecodeError:
+                        # Если не удалось распарсить JSON, выводим как есть
+                        response_formatted = clean_response_json
+                else:
+                    # Если ответ не строка, а уже словарь/список
+                    response_formatted = json.dumps(response_json, ensure_ascii=False, indent=4)
+            except Exception as e:
+                # Любая другая ошибка - просто выводим как строку
+                response_formatted = str(response_json)
             
             # Устанавливаем текст в многострочное текстовое поле
             self.response_details.setPlainText(response_formatted)
             
         except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
             error_message = f"Ошибка форматирования ответа: {str(e)}"
-            print(error_message)
+            logger.error(error_message)
             self.response_details.setPlainText(f"{error_message}\n\nИсходные данные:\n{response_json}")
     
     def update_api_logs_table(self, logs):
         """Обновление таблицы логов API"""
+        # Отключаем обработку выбора во время обновления
+        self.api_logs_table.blockSignals(True)
+        
         # Сохраняем полный список логов для фильтрации
         self.all_api_logs = logs
         
@@ -417,6 +493,47 @@ class MainWindow(QMainWindow):
             
         # Обновляем список API методов в фильтре на основе загруженных логов
         self.update_api_method_filter_items(logs)
+        
+        # Автоматически выбираем последнюю запись, если есть записи
+        if logs and len(logs) > 0:
+            # Устанавливаем фокус на последнюю строку
+            last_row = self.api_logs_table.rowCount() - 1
+            if last_row >= 0:
+                # Включаем обработку сигналов обратно
+                self.api_logs_table.blockSignals(False)
+                
+                # Выбираем строку
+                self.api_logs_table.selectRow(last_row)
+                
+                # Прокручиваем таблицу вниз, чтобы показать выбранную запись
+                self.api_logs_table.scrollToItem(self.api_logs_table.item(last_row, 0))
+                
+                # Получаем ID выбранного лога
+                log_id = int(self.api_logs_table.item(last_row, 0).text())
+                
+                # Сначала обновляем детали запроса и ответа на основе данных из таблицы
+                request_data = self.api_logs_table.item(last_row, 7).text() if self.api_logs_table.item(last_row, 7) else "{}"
+                response_data = self.api_logs_table.item(last_row, 8).text() if self.api_logs_table.item(last_row, 8) else "{}"
+                
+                self.update_request_details(request_data)
+                self.update_response_details(response_data)
+                
+                # Затем запрашиваем актуальные данные из базы
+                self.get_api_log_details_signal.emit(
+                    log_id, 
+                    lambda data: self.update_request_details(data), 
+                    lambda data: self.update_response_details(data)
+                )
+            else:
+                # Включаем обработку сигналов обратно
+                self.api_logs_table.blockSignals(False)
+        else:
+            # Включаем обработку сигналов обратно
+            self.api_logs_table.blockSignals(False)
+            
+            # Очищаем детали запроса и ответа
+            self.request_details.setPlainText("Нет данных запроса")
+            self.response_details.setPlainText("Нет данных ответа")
     
     def _update_api_logs_table_with_data(self, logs):
         """Обновление таблицы логов API конкретными данными"""
@@ -860,8 +977,19 @@ class MainWindow(QMainWindow):
         self.countries_table.resizeColumnsToContents()
     
     def show_message(self, title, message):
-        """Показать сообщение"""
+        """Отображение сообщения"""
         QMessageBox.information(self, title, message)
+
+    def show_confirmation(self, title, message):
+        """Отображение диалога подтверждения
+        
+        Returns:
+            bool: True если пользователь подтвердил, False в противном случае
+        """
+        reply = QMessageBox.question(self, title, message, 
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
+            QMessageBox.StandardButton.No)
+        return reply == QMessageBox.StandardButton.Yes
 
     def create_orders_tab(self):
         """Создание вкладки заказов"""
@@ -1834,10 +1962,11 @@ class MainWindow(QMainWindow):
         
         # Создаем таблицу для отображения файлов агрегации
         self.aggregation_files_table = QTableWidget()
-        self.aggregation_files_table.setColumnCount(6)
+        self.aggregation_files_table.setColumnCount(10)  # Добавляем колонки для статусов отчетов
         self.aggregation_files_table.setHorizontalHeaderLabels([
             "Имя файла", "Продукция", "Коды маркировки", "Коды агрегации 1 уровня", 
-            "Коды агрегации 2 уровня", "Комментарий"
+            "Коды агрегации 2 уровня", "Код отчета нанесения", "Статус отчета нанесения", 
+            "Код отчета агрегации", "Статус отчета агрегации", "Комментарий"
         ])
         self.aggregation_files_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.aggregation_files_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -1859,12 +1988,83 @@ class MainWindow(QMainWindow):
         send_utilisation_report_button.clicked.connect(self.on_send_utilisation_report)
         button_layout.addWidget(send_utilisation_report_button)
         
-        # Кнопка для обновления списка файлов
+        # Кнопка для проверки статуса отчета маркировки
+        check_report_status_button = QPushButton("Статус отчета маркировки")
+        check_report_status_button.clicked.connect(self.on_check_report_status)
+        button_layout.addWidget(check_report_status_button)
+        
+        # Кнопка для проверки статуса отчета агрегации
+        check_aggregation_status_button = QPushButton("Статус отчета агрегации")
+        check_aggregation_status_button.clicked.connect(self.on_check_aggregation_status)
+        button_layout.addWidget(check_aggregation_status_button)
+        
+        # Кнопка обновления списка
         refresh_button = QPushButton("Обновить")
         refresh_button.clicked.connect(self.load_aggregation_files_signal.emit)
         button_layout.addWidget(refresh_button)
         
         layout.addLayout(button_layout)
+        
+        # Добавляем вкладку
+        self.tabs.addTab(self.aggregation_files_tab, "Файлы агрегации")
+    
+    def on_check_report_status(self):
+        """Обработчик нажатия на кнопку 'Статус отчета маркировки'"""
+        # Проверяем, что выбрана строка в таблице файлов агрегации
+        if not self.aggregation_files_table.selectedItems():
+            QMessageBox.warning(
+                self,
+                "Предупреждение",
+                "Необходимо выбрать файл агрегации для проверки статуса отчета."
+            )
+            return
+        
+        # Получаем ID выбранного файла
+        row = self.aggregation_files_table.selectedItems()[0].row()
+        file_id = int(self.aggregation_files_table.item(row, 0).data(Qt.ItemDataRole.UserRole))
+        
+        # Получаем код отчета из таблицы
+        report_id_item = self.aggregation_files_table.item(row, 5)  # Колонка "Код отчета нанесения"
+        
+        if report_id_item and report_id_item.text():
+            report_id = report_id_item.text()
+            # Отправляем сигнал на проверку статуса отчета
+            self.check_report_status_signal.emit(file_id, report_id)
+        else:
+            QMessageBox.warning(
+                self,
+                "Предупреждение",
+                "Для выбранного файла отсутствует код отчета нанесения."
+            )
+            
+    def on_check_aggregation_status(self):
+        """Обработчик нажатия на кнопку 'Статус отчета агрегации'"""
+        # Проверяем, что выбрана строка в таблице файлов агрегации
+        if not self.aggregation_files_table.selectedItems():
+            QMessageBox.warning(
+                self,
+                "Предупреждение",
+                "Необходимо выбрать файл агрегации для проверки статуса отчета агрегации."
+            )
+            return
+        
+        # Получаем ID выбранного файла
+        row = self.aggregation_files_table.selectedItems()[0].row()
+        file_id = int(self.aggregation_files_table.item(row, 0).data(Qt.ItemDataRole.UserRole))
+        
+        # Получаем код отчета агрегации из таблицы
+        aggregation_report_id_item = self.aggregation_files_table.item(row, 6)  # Колонка "Код отчета агрегации"
+        
+        if aggregation_report_id_item and aggregation_report_id_item.text():
+            aggregation_report_id = aggregation_report_id_item.text()
+            # Отправляем сигнал на проверку статуса отчета агрегации
+            self.check_aggregation_status_signal.emit(file_id, aggregation_report_id)
+        else:
+            QMessageBox.warning(
+                self,
+                "Предупреждение",
+                "Для выбранного файла отсутствует код отчета агрегации."
+            )
 
     def on_send_utilisation_report(self):
         """Обработчик нажатия на кнопку 'Отчет о нанесении'"""
@@ -2001,43 +2201,102 @@ class MainWindow(QMainWindow):
         self.aggregation_files_table.setRowCount(0)  # Очищаем таблицу
         
         for file in files:
-            # Логирование информации о файле
-            logging.info(f"Добавление файла в таблицу: {file.filename}")
-            logging.info(f"Продукция: {file.product}")
-            logging.info(f"Кол-во кодов маркировки: {len(file.marking_codes)}")
-            logging.info(f"Кол-во кодов агрегации 1 уровня: {len(file.level1_codes)}")
-            logging.info(f"Кол-во кодов агрегации 2 уровня: {len(file.level2_codes)}")
-            
+            # Добавляем новую строку
             row = self.aggregation_files_table.rowCount()
             self.aggregation_files_table.insertRow(row)
             
-            # Имя файла
-            item = QTableWidgetItem(file.filename)
-            item.setData(Qt.ItemDataRole.UserRole, file.id)  # Сохраняем ID в теге
-            self.aggregation_files_table.setItem(row, 0, item)
+            # Имя файла и ID (скрытый)
+            filename_item = QTableWidgetItem(file.filename)
+            filename_item.setData(Qt.ItemDataRole.UserRole, file.id)  # Сохраняем ID в данных элемента
+            self.aggregation_files_table.setItem(row, 0, filename_item)
             
             # Продукция
-            item = QTableWidgetItem(file.product)
-            self.aggregation_files_table.setItem(row, 1, item)
+            self.aggregation_files_table.setItem(row, 1, QTableWidgetItem(file.product or ""))
             
-            # Коды маркировки
-            item = QTableWidgetItem(str(len(file.marking_codes)))
-            self.aggregation_files_table.setItem(row, 2, item)
+            # Количество кодов маркировки
+            marking_codes_count = len(file.marking_codes) if file.marking_codes else 0
+            self.aggregation_files_table.setItem(row, 2, QTableWidgetItem(str(marking_codes_count)))
             
-            # Коды агрегации 1 уровня
-            item = QTableWidgetItem(str(len(file.level1_codes)))
-            self.aggregation_files_table.setItem(row, 3, item)
+            # Количество кодов агрегации 1 уровня
+            level1_codes_count = len(file.level1_codes) if file.level1_codes else 0
+            self.aggregation_files_table.setItem(row, 3, QTableWidgetItem(str(level1_codes_count)))
             
-            # Коды агрегации 2 уровня
-            item = QTableWidgetItem(str(len(file.level2_codes)))
-            self.aggregation_files_table.setItem(row, 4, item)
+            # Количество кодов агрегации 2 уровня
+            level2_codes_count = len(file.level2_codes) if file.level2_codes else 0
+            self.aggregation_files_table.setItem(row, 4, QTableWidgetItem(str(level2_codes_count)))
+            
+            # Код отчета нанесения
+            report_id = file.report_id or ""
+            self.aggregation_files_table.setItem(row, 5, QTableWidgetItem(report_id))
+            
+            # Статус отчета нанесения
+            report_status = file.report_status or ""
+            report_status_text = self.get_report_status_text(report_status)
+            report_status_item = QTableWidgetItem(report_status_text)
+            
+            # Устанавливаем цвет фона в зависимости от статуса
+            if report_status:
+                if report_status == "SENT":
+                    report_status_item.setBackground(QColor(200, 255, 200))  # Зеленый для SENT
+                elif report_status == "PENDING":
+                    report_status_item.setBackground(QColor(255, 255, 200))  # Желтый для PENDING
+                elif report_status == "REJECTED":
+                    report_status_item.setBackground(QColor(255, 200, 200))  # Красный для REJECTED
+            
+            self.aggregation_files_table.setItem(row, 6, report_status_item)
+            
+            # Код отчета агрегации
+            aggregation_report_id = file.aggregation_report_id or ""
+            self.aggregation_files_table.setItem(row, 7, QTableWidgetItem(aggregation_report_id))
+            
+            # Статус отчета агрегации
+            aggregation_status = file.aggregation_status or ""
+            aggregation_status_text = self.get_report_status_text(aggregation_status)
+            aggregation_status_item = QTableWidgetItem(aggregation_status_text)
+            
+            # Устанавливаем цвет фона в зависимости от статуса
+            if aggregation_status:
+                if aggregation_status == "SENT":
+                    aggregation_status_item.setBackground(QColor(200, 255, 200))  # Зеленый для SENT
+                elif aggregation_status == "PENDING":
+                    aggregation_status_item.setBackground(QColor(255, 255, 200))  # Желтый для PENDING
+                elif aggregation_status == "REJECTED":
+                    aggregation_status_item.setBackground(QColor(255, 200, 200))  # Красный для REJECTED
+            
+            self.aggregation_files_table.setItem(row, 8, aggregation_status_item)
             
             # Комментарий
-            item = QTableWidgetItem(file.comment)
-            self.aggregation_files_table.setItem(row, 5, item)
+            self.aggregation_files_table.setItem(row, 9, QTableWidgetItem(file.comment or ""))
         
-        # Подгоняем ширину колонок
+        # Подгоняем размеры колонок
         self.aggregation_files_table.resizeColumnsToContents()
+        
+        # Обновляем заголовок вкладки с количеством файлов
+        tab_index = self.tabs.indexOf(self.aggregation_files_tab)
+        if tab_index >= 0:
+            self.tabs.setTabText(tab_index, f"Файлы агрегации ({len(files)})")
+            
+    def get_report_status_text(self, status):
+        """Преобразование кода статуса отчета в читаемый текст
+        
+        Args:
+            status (str): Код статуса (PENDING, READY_TO_SEND, REJECTED, SENT)
+            
+        Returns:
+            str: Текстовое описание статуса на русском
+        """
+        if not status:
+            return ""
+            
+        status_map = {
+            "PENDING": "Ожидает обработки",
+            "READY_TO_SEND": "Готов к отправке",
+            "REJECTED": "Отклонен",
+            "SENT": "Отправлен",
+            "CREATED": "Создан"
+        }
+        
+        return status_map.get(status, status)
 
 class CatalogsDialog(QDialog):
     """Диалог для работы со справочниками"""

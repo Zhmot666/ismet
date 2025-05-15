@@ -95,19 +95,26 @@ class APIOrder:
         self.id = None  # ID в локальной базе данных 
 
 class AggregationFile:
-    """Модель для представления файлов агрегации"""
-    def __init__(self, id: int, filename: str, product: str, marking_codes: List[str], level1_codes: List[str], 
-                 level2_codes: List[str], comment: str = "", json_content: str = "", created_at: datetime = None, data: Dict = None):
+    """Модель файла агрегации"""
+    def __init__(self, id: int, filename: str, product: str, marking_codes: List[str], 
+                 level1_codes: List[str], level2_codes: List[str], comment: str = "", 
+                 json_content: str = "", created_at: datetime = None, data: Dict = None,
+                 report_id: str = None, aggregation_report_id: str = None,
+                 report_status: str = None, aggregation_status: str = None):
         self.id = id
         self.filename = filename
         self.product = product
-        self.marking_codes = marking_codes
-        self.level1_codes = level1_codes
-        self.level2_codes = level2_codes
-        self.comment = comment
-        self.json_content = json_content
-        self.created_at = created_at 
-        self.data = data or {} 
+        self.marking_codes = marking_codes or []
+        self.level1_codes = level1_codes or []
+        self.level2_codes = level2_codes or []
+        self.comment = comment or ""
+        self.json_content = json_content or ""
+        self.created_at = created_at
+        self.data = data or {}
+        self.report_id = report_id or ""
+        self.aggregation_report_id = aggregation_report_id or ""
+        self.report_status = report_status or ""
+        self.aggregation_status = aggregation_status or ""
 
 class UsageType:
     """Класс для представления информации о типе использования кодов маркировки
@@ -124,3 +131,21 @@ class UsageType:
         self.code = code
         self.name = name
         self.description = description 
+
+class ReportStatus:
+    """Справочник статусов отчетов"""
+    PENDING = "PENDING"  # Отчет находится в ожидании
+    READY_TO_SEND = "READY_TO_SEND"  # Отчет готов к отправке
+    REJECTED = "REJECTED"  # Отчет отклонен
+    SENT = "SENT"  # Отчет отправлен
+    
+    @classmethod
+    def get_description(cls, status):
+        """Возвращает описание статуса отчета на русском языке"""
+        descriptions = {
+            cls.PENDING: "Отчет находится в ожидании",
+            cls.READY_TO_SEND: "Отчет готов к отправке",
+            cls.REJECTED: "Отчет отклонен",
+            cls.SENT: "Отчет отправлен"
+        }
+        return descriptions.get(status, f"Неизвестный статус ({status})") 
