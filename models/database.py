@@ -103,6 +103,7 @@ class CredentialsORM(Base):
     omsid = Column(String, nullable=False)
     token = Column(String, nullable=False)
     gln = Column(String, default='')
+    inn = Column(String, default='')
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -236,6 +237,7 @@ class Database:
                 omsid TEXT NOT NULL,
                 token TEXT NOT NULL,
                 gln TEXT DEFAULT '',
+                inn TEXT DEFAULT '',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -435,6 +437,15 @@ class Database:
                 cursor.execute("ALTER TABLE credentials ADD COLUMN gln TEXT DEFAULT ''")
                 self.conn.commit()
                 logger.info("Добавлена колонка gln в таблицу credentials")
+            except Exception as e:
+                logger.error(f"Ошибка при миграции базы данных: {str(e)}")
+        
+        # Проверяем и добавляем столбец inn в таблицу credentials
+        if "inn" not in column_names:
+            try:
+                cursor.execute("ALTER TABLE credentials ADD COLUMN inn TEXT DEFAULT ''")
+                self.conn.commit()
+                logger.info("Добавлена колонка inn в таблицу credentials")
             except Exception as e:
                 logger.error(f"Ошибка при миграции базы данных: {str(e)}")
         
@@ -1045,13 +1056,14 @@ class Database:
         self.conn.commit()
     
     # Методы для работы с учетными данными
-    def add_credentials(self, omsid: str, token: str, gln: str, connection_id: int = None) -> Credentials:
+    def add_credentials(self, omsid: str, token: str, gln: str, inn: str, connection_id: int = None) -> Credentials:
         """Добавление новых учетных данных
         
         Args:
             omsid: OMS ID
             token: Токен
             gln: GLN
+            inn: ИНН
             connection_id: ID подключения (опционально)
             
         Returns:
@@ -1059,8 +1071,8 @@ class Database:
         """
         cursor = self.conn.cursor()
         cursor.execute(
-            "INSERT INTO credentials (omsid, token, gln) VALUES (?, ?, ?)",
-            (omsid, token, gln)
+            "INSERT INTO credentials (omsid, token, gln, inn) VALUES (?, ?, ?, ?)",
+            (omsid, token, gln, inn)
         )
         self.conn.commit()
         credentials_id = cursor.lastrowid
@@ -1082,7 +1094,7 @@ class Database:
                             credential_id INTEGER,
                             connection_id INTEGER,
                             FOREIGN KEY (credential_id) REFERENCES credentials (id),
-                            FOREIGN KEY (connection_id) REFERENCES connections (id)
+                            FOREIGN KEY (connection_id) REFERENCES connections (id) ON DELETE SET NULL
                         )
                     ''')
                     self.conn.commit()
@@ -1094,14 +1106,14 @@ class Database:
                     self.conn.commit()
         
         # Возвращаем объект учетных данных
-        return Credentials(id=credentials_id, omsid=omsid, token=token, gln=gln)
+        return Credentials(id=credentials_id, omsid=omsid, token=token, gln=gln, inn=inn)
     
-    def update_credentials(self, credentials_id: int, omsid: str, token: str, gln: str) -> Credentials:
+    def update_credentials(self, credentials_id: int, omsid: str, token: str, gln: str, inn: str) -> Credentials:
         """Обновление учетных данных в базе данных"""
         cursor = self.conn.cursor()
         cursor.execute(
-            "UPDATE credentials SET omsid = ?, token = ?, gln = ? WHERE id = ?",
-            (omsid, token, gln, credentials_id)
+            "UPDATE credentials SET omsid = ?, token = ?, gln = ?, inn = ? WHERE id = ?",
+            (omsid, token, gln, inn, credentials_id)
         )
         self.conn.commit()
         
@@ -1111,7 +1123,7 @@ class Database:
         )
         row = cursor.fetchone()
         
-        return Credentials(row["id"], row["omsid"], row["token"], row["gln"])
+        return Credentials(row["id"], row["omsid"], row["token"], row["gln"], row["inn"])
     
     def delete_credentials(self, credentials_id: int) -> None:
         """Удаление учетных данных из базы данных"""
@@ -1130,7 +1142,7 @@ class Database:
         result = []
         
         for row in rows:
-            credentials = Credentials(row["id"], row["omsid"], row["token"], row["gln"])
+            credentials = Credentials(row["id"], row["omsid"], row["token"], row["gln"], row["inn"])
             result.append(credentials)
         
         return result
@@ -1142,7 +1154,7 @@ class Database:
         row = cursor.fetchone()
         
         if row:
-            return Credentials(row["id"], row["omsid"], row["token"], row["gln"])
+            return Credentials(row["id"], row["omsid"], row["token"], row["gln"], row["inn"])
         
         return None
     
@@ -1154,7 +1166,7 @@ class Database:
         
         result = []
         for row in rows:
-            credentials = Credentials(row["id"], row["omsid"], row["token"], row["gln"])
+            credentials = Credentials(row["id"], row["omsid"], row["token"], row["gln"], row["inn"])
             result.append(credentials)
         
         return result
@@ -2589,6 +2601,7 @@ class Database:
                     omsid TEXT NOT NULL,
                     token TEXT NOT NULL,
                     gln TEXT NOT NULL,
+                    inn TEXT NOT NULL,
                     connection_id INTEGER NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (connection_id) REFERENCES connections(id) ON DELETE SET NULL

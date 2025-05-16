@@ -52,8 +52,8 @@ class MainWindow(QMainWindow):
     set_active_connection_signal = pyqtSignal(int)
     
     # Сигналы для работы с учетными данными
-    add_credentials_signal = pyqtSignal(str, str, str, str)  # omsid, token, gln, connection_id
-    edit_credentials_signal = pyqtSignal(int, str, str, str)  # id, omsid, token, gln
+    add_credentials_signal = pyqtSignal(str, str, str, str, str)  # omsid, token, gln, inn, connection_id
+    edit_credentials_signal = pyqtSignal(int, str, str, str, str)  # id, omsid, token, gln, inn
     delete_credentials_signal = pyqtSignal(int)
     set_active_credentials_signal = pyqtSignal(int)  # id
     
@@ -113,6 +113,7 @@ class MainWindow(QMainWindow):
     send_utilisation_report_signal = pyqtSignal(dict)  # data
     check_report_status_signal = pyqtSignal(int, str)  # file_id, report_id
     check_aggregation_status_signal = pyqtSignal(int, str)  # file_id, aggregation_report_id
+    send_aggregation_report_signal = pyqtSignal(dict)  # data - сигнал для отправки отчета об агрегации
     
     def __init__(self):
         super().__init__()
@@ -875,7 +876,7 @@ class MainWindow(QMainWindow):
                 connection_id = int(self.connections_table.item(row, 0).text())
             
             # Теперь connection_id необязательный параметр
-            self.add_credentials_signal.emit(data['omsid'], data['token'], data['gln'], connection_id)
+            self.add_credentials_signal.emit(data['omsid'], data['token'], data['gln'], data['inn'], connection_id)
     
     def on_edit_credentials_clicked(self):
         """Обработчик нажатия кнопки редактирования учетных данных"""
@@ -892,12 +893,13 @@ class MainWindow(QMainWindow):
             omsid = self.credentials_table.item(row, 1).text() if self.credentials_table.item(row, 1) else ""
             token = self.credentials_table.item(row, 2).text() if self.credentials_table.item(row, 2) else ""
             gln = self.credentials_table.item(row, 3).text() if self.credentials_table.item(row, 3) else ""
+            inn = self.credentials_table.item(row, 4).text() if self.credentials_table.item(row, 4) else ""
             
             # Открываем диалог редактирования
-            dialog = CredentialsDialog(self, {"omsid": omsid, "token": token, "gln": gln})
+            dialog = CredentialsDialog(self, {"omsid": omsid, "token": token, "gln": gln, "inn": inn})
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 data = dialog.get_data()
-                self.edit_credentials_signal.emit(credentials_id, data['omsid'], data['token'], data['gln'])
+                self.edit_credentials_signal.emit(credentials_id, data['omsid'], data['token'], data['gln'], data['inn'])
         except Exception as e:
             self.show_message("Ошибка", f"Ошибка при редактировании учетных данных: {str(e)}")
     
@@ -1030,6 +1032,7 @@ class MainWindow(QMainWindow):
             self.credentials_table.setItem(row, 1, QTableWidgetItem(cred.omsid))
             self.credentials_table.setItem(row, 2, QTableWidgetItem(cred.token))
             self.credentials_table.setItem(row, 3, QTableWidgetItem(cred.gln))
+            self.credentials_table.setItem(row, 4, QTableWidgetItem(cred.inn))
     
     def update_nomenclature_table(self, nomenclature):
         """Обновление таблицы номенклатуры"""
@@ -1389,8 +1392,8 @@ class MainWindow(QMainWindow):
         
         # Таблица учетных данных
         self.credentials_table = QTableWidget()
-        self.credentials_table.setColumnCount(4)
-        self.credentials_table.setHorizontalHeaderLabels(["ID", "OMS ID", "Токен", "GLN"])
+        self.credentials_table.setColumnCount(5)
+        self.credentials_table.setHorizontalHeaderLabels(["ID", "OMS ID", "Токен", "GLN", "INN"])
         layout.addWidget(self.credentials_table)
         
         # Кнопки управления учетными данными
@@ -2071,6 +2074,11 @@ class MainWindow(QMainWindow):
         check_aggregation_status_button.clicked.connect(self.on_check_aggregation_status)
         button_layout.addWidget(check_aggregation_status_button)
         
+        # Кнопка для отправки отчета об агрегации
+        send_aggregation_report_button = QPushButton("Отчет об агрегации")
+        send_aggregation_report_button.clicked.connect(self.on_send_aggregation_report)
+        button_layout.addWidget(send_aggregation_report_button)
+        
         # Кнопка обновления списка
         refresh_button = QPushButton("Обновить")
         refresh_button.clicked.connect(self.load_aggregation_files_signal.emit)
@@ -2112,8 +2120,11 @@ class MainWindow(QMainWindow):
             
     def on_check_aggregation_status(self):
         """Обработчик нажатия на кнопку 'Статус отчета агрегации'"""
+        logger.info("Нажата кнопка 'Статус отчета агрегации'")
+        
         # Проверяем, что выбрана строка в таблице файлов агрегации
         if not self.aggregation_files_table.selectedItems():
+            logger.warning("Не выбрана строка в таблице файлов агрегации")
             QMessageBox.warning(
                 self,
                 "Предупреждение",
@@ -2123,22 +2134,22 @@ class MainWindow(QMainWindow):
         
         # Получаем ID выбранного файла
         row = self.aggregation_files_table.selectedItems()[0].row()
-        file_id = int(self.aggregation_files_table.item(row, 0).data(Qt.ItemDataRole.UserRole))
+        file_id = self.aggregation_files_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        aggregation_report_id_item = self.aggregation_files_table.item(row, 7)  # Колонка "Код отчета агрегации"
+        aggregation_report_id = aggregation_report_id_item.text() if aggregation_report_id_item else None
         
-        # Получаем код отчета агрегации из таблицы
-        aggregation_report_id_item = self.aggregation_files_table.item(row, 6)  # Колонка "Код отчета агрегации"
-        
-        if aggregation_report_id_item and aggregation_report_id_item.text():
-            aggregation_report_id = aggregation_report_id_item.text()
-            # Отправляем сигнал на проверку статуса отчета агрегации
+        if aggregation_report_id:
+            logger.info(f"Найден код отчета агрегации: {aggregation_report_id}")
+            logger.info("Отправляем сигнал check_aggregation_status_signal")
             self.check_aggregation_status_signal.emit(file_id, aggregation_report_id)
         else:
+            logger.warning("Отсутствует код отчета агрегации для выбранного файла")
             QMessageBox.warning(
                 self,
                 "Предупреждение",
                 "Для выбранного файла отсутствует код отчета агрегации."
             )
-
+    
     def on_send_utilisation_report(self):
         """Обработчик нажатия на кнопку 'Отчет о нанесении'"""
         # Проверяем, что выбрана строка в таблице файлов агрегации
@@ -2163,18 +2174,44 @@ class MainWindow(QMainWindow):
             
             # Отправляем сигнал на отправку отчета
             self.send_utilisation_report_signal.emit(report_data)
+            
+    def on_send_aggregation_report(self):
+        """Обработчик нажатия на кнопку 'Отчет об агрегации'"""
+        # Проверяем, что выбрана строка в таблице файлов агрегации
+        if not self.aggregation_files_table.selectedItems():
+            QMessageBox.warning(
+                self,
+                "Предупреждение",
+                "Необходимо выбрать файл агрегации для отправки отчета об агрегации."
+            )
+            return
+        
+        # Получаем ID выбранного файла
+        row = self.aggregation_files_table.selectedItems()[0].row()
+        file_id = int(self.aggregation_files_table.item(row, 0).data(Qt.ItemDataRole.UserRole))
+        
+        # Создаем диалог для отправки отчета об агрегации
+        dialog = AggregationReportDialog(file_id, self, self.controller)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            # Получаем данные отчета из диалога
+            report_data = dialog.get_report_data()
+            
+            # Отправляем сигнал на отправку отчета об агрегации
+            self.send_aggregation_report_signal.emit(report_data)
 
     def show_aggregation_file_context_menu(self, position):
         """Отображение контекстного меню для таблицы файлов агрегации"""
         menu = QMenu()
         export_action = menu.addAction("Выгрузить JSON")
         utilisation_action = menu.addAction("Отчет о нанесении")
+        aggregation_action = menu.addAction("Отчет об агрегации")
         delete_action = menu.addAction("Удалить")
         
         # Проверяем, что выбрана строка
         if not self.aggregation_files_table.selectedItems():
             export_action.setEnabled(False)
             utilisation_action.setEnabled(False)
+            aggregation_action.setEnabled(False)
             delete_action.setEnabled(False)
         
         action = menu.exec(self.aggregation_files_table.mapToGlobal(position))
@@ -2202,6 +2239,10 @@ class MainWindow(QMainWindow):
         elif action == utilisation_action:
             # Открываем диалог для создания отчета о нанесении
             self.on_send_utilisation_report()
+        
+        elif action == aggregation_action:
+            # Открываем диалог для создания отчета об агрегации
+            self.on_send_aggregation_report()
         
         elif action == delete_action:
             # Запрашиваем подтверждение
@@ -3078,8 +3119,8 @@ class SettingsDialog(QDialog):
         
         # Создаем копию таблицы учетных данных и подключаем данные
         self.credentials_table = QTableWidget()
-        self.credentials_table.setColumnCount(4)
-        self.credentials_table.setHorizontalHeaderLabels(["ID", "OMS ID", "Токен", "GLN"])
+        self.credentials_table.setColumnCount(5)
+        self.credentials_table.setHorizontalHeaderLabels(["ID", "OMS ID", "Токен", "GLN", "INN"])
         
         # Первоначальное заполнение таблицы
         self.reload_credentials()
@@ -3127,7 +3168,7 @@ class SettingsDialog(QDialog):
                 connection_id = int(self.connections_table.item(row, 0).text())
             
             # Вызываем сигнал в главном окне
-            self.main_window.add_credentials_signal.emit(data['omsid'], data['token'], data['gln'], connection_id)
+            self.main_window.add_credentials_signal.emit(data['omsid'], data['token'], data['gln'], data['inn'], connection_id)
     
     def on_edit_credentials(self):
         """Обработчик нажатия кнопки редактирования учетных данных в диалоге"""
@@ -3144,12 +3185,13 @@ class SettingsDialog(QDialog):
             omsid = self.credentials_table.item(row, 1).text() if self.credentials_table.item(row, 1) else ""
             token = self.credentials_table.item(row, 2).text() if self.credentials_table.item(row, 2) else ""
             gln = self.credentials_table.item(row, 3).text() if self.credentials_table.item(row, 3) else ""
+            inn = self.credentials_table.item(row, 4).text() if self.credentials_table.item(row, 4) else ""
             
             # Открываем диалог редактирования
-            dialog = CredentialsDialog(self, {"omsid": omsid, "token": token, "gln": gln})
+            dialog = CredentialsDialog(self, {"omsid": omsid, "token": token, "gln": gln, "inn": inn})
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 data = dialog.get_data()
-                self.main_window.edit_credentials_signal.emit(credentials_id, data['omsid'], data['token'], data['gln'])
+                self.main_window.edit_credentials_signal.emit(credentials_id, data['omsid'], data['token'], data['gln'], data['inn'])
         except Exception as e:
             QMessageBox.warning(self, "Ошибка", f"Ошибка при редактировании учетных данных: {str(e)}")
     
@@ -3598,3 +3640,448 @@ class UtilisationReportDialog(QDialog):
             logging.getLogger(__name__).warning("omsId не был добавлен в отчет об использовании")
         
         return report_data
+        
+class AggregationReportDialog(QDialog):
+    """Диалог для создания отчета об агрегации"""
+    
+    def __init__(self, file_id, parent=None, controller=None):
+        super().__init__(parent)
+        self.file_id = file_id
+        self.setWindowTitle("Отчет об агрегации")
+        self.setMinimumWidth(600)
+        self.setMinimumHeight(400)
+        
+        # Получаем данные о файле агрегации из контроллера
+        self.parent_window = parent
+        self.controller = controller  # Сохраняем ссылку на контроллер
+        self.file_data = None
+        
+        # Создаем макет
+        layout = QVBoxLayout(self)
+        
+        # Информация о файле
+        file_info_layout = QFormLayout()
+        self.file_name_label = QLabel("Загрузка...")
+        self.product_label = QLabel("Загрузка...")
+        self.units_count_label = QLabel("Загрузка...")
+        
+        file_info_layout.addRow("Файл:", self.file_name_label)
+        file_info_layout.addRow("Продукция:", self.product_label)
+        file_info_layout.addRow("Количество единиц агрегации:", self.units_count_label)
+        
+        # Добавляем текстовое поле для идентификатора производственной линии
+        self.production_line_input = QLineEdit("LINE01")
+        self.production_line_input.setPlaceholderText("Введите идентификатор производственной линии")
+        self.production_line_input.setToolTip("Идентификатор производственной линии для отчета об агрегации")
+        file_info_layout.addRow("Производственная линия:", self.production_line_input)
+        
+        # Добавляем текстовое поле для идентификатора производственного заказа
+        self.production_order_input = QLineEdit()
+        self.production_order_input.setPlaceholderText("Введите идентификатор производственного заказа")
+        self.production_order_input.setToolTip("Идентификатор производственного заказа для отчета об агрегации")
+        file_info_layout.addRow("Производственный заказ:", self.production_order_input)
+        
+        layout.addLayout(file_info_layout)
+        
+        # Таблица для отображения единиц агрегации
+        self.units_table = QTableWidget()
+        self.units_table.setColumnCount(4)
+        self.units_table.setHorizontalHeaderLabels([
+            "Код агрегата", "Тип агрегации", "Емкость упаковки", "Включить в отчет"
+        ])
+        self.units_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.units_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.units_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.units_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        
+        # Индикатор загрузки
+        self.loading_label = QLabel("Загрузка данных файла агрегации...")
+        layout.addWidget(self.loading_label)
+        
+        layout.addWidget(QLabel("Единицы агрегации для включения в отчет:"))
+        layout.addWidget(self.units_table)
+        
+        # Кнопки управления
+        button_layout = QHBoxLayout()
+        self.select_all_button = QPushButton("Выбрать все")
+        self.select_all_button.clicked.connect(self.select_all_units)
+        button_layout.addWidget(self.select_all_button)
+        
+        self.deselect_all_button = QPushButton("Снять выбор")
+        self.deselect_all_button.clicked.connect(self.deselect_all_units)
+        button_layout.addWidget(self.deselect_all_button)
+        
+        button_layout.addStretch()
+        
+        self.cancel_button = QPushButton("Отмена")
+        self.cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(self.cancel_button)
+        
+        self.submit_button = QPushButton("Отправить отчет")
+        self.submit_button.clicked.connect(self.accept)
+        button_layout.addWidget(self.submit_button)
+        
+        layout.addLayout(button_layout)
+        
+        # Загружаем данные файла
+        self.load_file_data()
+    
+    def load_file_data(self):
+        """Загрузка данных файла агрегации"""
+        try:
+            # Получаем данные из БД через контроллер
+            import logging
+            
+            logger = logging.getLogger(__name__)
+            logger.info(f"Начинаем загрузку данных файла агрегации с ID={self.file_id}")
+            
+            # Проверяем, есть ли контроллер
+            if not self.controller:
+                logger.error("Отсутствует контроллер")
+                QMessageBox.critical(self, "Ошибка", "Ошибка конфигурации: отсутствует контроллер")
+                self.reject()
+                return
+                
+            # Проверяем соединение с базой данных
+            if not hasattr(self.controller, 'db') or not self.controller.db:
+                logger.error("У контроллера отсутствует соединение с базой данных")
+                QMessageBox.critical(self, "Ошибка", "Ошибка конфигурации: нет соединения с базой данных")
+                self.reject()
+                return
+            
+            # Получаем данные из контроллера
+            try:
+                # Получаем файл агрегации по ID через метод контроллера
+                logger.info(f"Пробуем получить файл агрегации с ID={self.file_id} через метод контроллера")
+                self.file_data = self.controller.get_aggregation_file_by_id(self.file_id)
+                
+                if self.file_data:
+                    # Файл найден, проверяем наличие кодов агрегации
+                    logger.info(f"Файл агрегации получен: {self.file_data.filename}")
+                    
+                    # Проверяем наличие кодов агрегации 1 уровня
+                    if not hasattr(self.file_data, 'level1_codes') or not self.file_data.level1_codes:
+                        logger.warning(f"Файл агрегации не содержит кодов агрегации 1 уровня")
+                        QMessageBox.warning(
+                            self,
+                            "Предупреждение",
+                            "Файл агрегации не содержит кодов агрегации для отчета"
+                        )
+                    else:
+                        logger.info(f"Количество кодов агрегации 1 уровня в файле: {len(self.file_data.level1_codes)}")
+                    
+                    # Обновляем UI
+                    self.update_file_info()
+                    return
+                else:
+                    logger.error(f"Файл агрегации с ID={self.file_id} не найден в базе данных")
+                    QMessageBox.critical(
+                        self,
+                        "Ошибка",
+                        f"Не удалось получить данные файла агрегации с ID {self.file_id}"
+                    )
+                    self.reject()
+                    return
+            except Exception as e:
+                logger.error(f"Ошибка при получении данных из контроллера: {str(e)}")
+                logger.exception("Подробная трассировка ошибки:")
+                QMessageBox.critical(
+                    self,
+                    "Ошибка",
+                    f"Не удалось загрузить данные файла агрегации: {str(e)}"
+                )
+                self.reject()
+                return
+            
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке данных файла агрегации: {str(e)}")
+            logger.exception("Подробная трассировка ошибки:")
+            QMessageBox.critical(
+                self,
+                "Ошибка",
+                f"Не удалось загрузить данные файла агрегации: {str(e)}"
+            )
+            self.reject()
+    
+    def update_file_info(self):
+        """Обновление информации о файле и заполнение таблицы"""
+        if not self.file_data:
+            return
+        
+        # Обновляем метки с информацией о файле
+        self.file_name_label.setText(self.file_data.filename)
+        self.product_label.setText(self.file_data.product)
+        
+        # Получаем количество единиц агрегации
+        level1_count = len(self.file_data.level1_codes) if hasattr(self.file_data, 'level1_codes') and self.file_data.level1_codes else 0
+        level2_count = len(self.file_data.level2_codes) if hasattr(self.file_data, 'level2_codes') and self.file_data.level2_codes else 0
+        # Изменено: учитываем только единицы level 1
+        total_units = level1_count
+        self.units_count_label.setText(str(total_units))
+        
+        # Скрываем индикатор загрузки
+        self.loading_label.hide()
+        
+        # Создаем список единиц агрегации для таблицы
+        aggregation_units = []
+        
+        # Получаем количество кодов маркировки (level 0)
+        marking_codes_count = len(self.file_data.marking_codes) if hasattr(self.file_data, 'marking_codes') and self.file_data.marking_codes else 0
+        
+        # Расчет средней емкости для каждой единицы level 1
+        # Если есть единицы level 1, распределяем коды level 0 между ними
+        capacity_per_unit = marking_codes_count // level1_count if level1_count > 0 else 0
+        
+        # Добавляем коды агрегации 1 уровня
+        if hasattr(self.file_data, 'level1_codes') and self.file_data.level1_codes:
+            for code in self.file_data.level1_codes:
+                aggregation_units.append({
+                    "code": code,
+                    "type": "AGGREGATION",  # Универсальный тип агрегации
+                    "capacity": capacity_per_unit  # Устанавливаем расчетную емкость
+                })
+        
+        # Удалено: больше не добавляем коды агрегации 2 уровня в таблицу
+        
+        # Заполняем таблицу агрегационными единицами
+        self.units_table.setRowCount(len(aggregation_units))
+        
+        for i, unit in enumerate(aggregation_units):
+            # Код агрегата
+            self.units_table.setItem(i, 0, QTableWidgetItem(unit["code"]))
+            
+            # Тип агрегации
+            type_item = QTableWidgetItem(unit["type"])
+            self.units_table.setItem(i, 1, type_item)
+            
+            # Емкость упаковки
+            capacity_spinbox = QSpinBox()
+            capacity_spinbox.setMinimum(1)
+            capacity_spinbox.setMaximum(999)
+            capacity_spinbox.setValue(unit["capacity"])
+            self.units_table.setCellWidget(i, 2, capacity_spinbox)
+            
+            # Чекбокс для выбора
+            checkbox = QTableWidgetItem()
+            checkbox.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            checkbox.setCheckState(Qt.CheckState.Checked)
+            self.units_table.setItem(i, 3, checkbox)
+        
+        self.units_table.resizeColumnsToContents()
+    
+    def select_all_units(self):
+        """Выбрать все единицы агрегации"""
+        for i in range(self.units_table.rowCount()):
+            self.units_table.item(i, 3).setCheckState(Qt.CheckState.Checked)
+    
+    def deselect_all_units(self):
+        """Снять выбор со всех единиц агрегации"""
+        for i in range(self.units_table.rowCount()):
+            self.units_table.item(i, 3).setCheckState(Qt.CheckState.Unchecked)
+    
+    def get_report_data(self):
+        """Получение данных отчета для отправки"""
+        # Получаем omsId из текущих учетных данных через контроллер
+        omsId = ""
+        innId = ""
+        glnId = ""
+        try:
+            if self.controller and hasattr(self.controller, 'db'):
+                credentials = self.controller.db.get_credentials()
+                if credentials and len(credentials) > 0:
+                    omsId = credentials[0].omsid
+                    innId = credentials[0].inn
+                    glnId = credentials[0].gln
+                    logging.getLogger(__name__).info(f"Получен omsId для отчета: {omsId}")
+                    logging.getLogger(__name__).info(f"Получен ИНН для отчета: {innId}")
+                    logging.getLogger(__name__).info(f"Получен GLN для отчета: {glnId}")
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Ошибка при получении omsId/ИНН/GLN: {str(e)}")
+            
+        # Если omsId не удалось получить из БД, пытаемся получить из api_client
+        if not omsId and self.controller and hasattr(self.controller, 'api_client'):
+            omsId = self.controller.api_client.omsid
+            if omsId:
+                logging.getLogger(__name__).info(f"Получен omsId из API-клиента: {omsId}")
+        
+        # Для отчёта нам нужны все коды маркировки
+        marking_codes = []
+        if hasattr(self.file_data, 'marking_codes') and self.file_data.marking_codes:
+            marking_codes = [self.normalize_code(code) for code in self.file_data.marking_codes]
+            logging.getLogger(__name__).info(f"Получено {len(marking_codes)} кодов маркировки для отчета")
+        
+        # Количество кодов маркировки нулевого уровня (level 0)
+        total_codes = len(marking_codes)
+        
+        # Количество единиц агрегации первого уровня (level 1)
+        level1_count = 0
+        if hasattr(self.file_data, 'level1_codes') and self.file_data.level1_codes:
+            level1_count = len(self.file_data.level1_codes)
+        
+        # Равномерно распределяем коды маркировки level 0 по единицам агрегации level 1
+        codes_per_unit = total_codes // level1_count if level1_count > 0 else 0
+        
+        # Собираем выбранные единицы агрегации
+        aggregation_units = []
+        selected_level1_units = []
+        # Удалено: больше не собираем коды level 2
+        
+        # Сначала определяем, какие единицы выбраны
+        for i in range(self.units_table.rowCount()):
+            if self.units_table.item(i, 3).checkState() == Qt.CheckState.Checked:
+                unit_code = self.units_table.item(i, 0).text()
+                unit_type = self.units_table.item(i, 1).text()
+                unit_capacity = self.units_table.cellWidget(i, 2).value()
+                
+                # Определяем, к какому уровню относится эта единица
+                if hasattr(self.file_data, 'level1_codes') and unit_code in self.file_data.level1_codes:
+                    selected_level1_units.append({
+                        "unitSerialNumber": unit_code,
+                        "aggregationType": unit_type,
+                        "aggregationUnitCapacity": unit_capacity,
+                        "aggregatedItemsCount": unit_capacity,  # Добавляем новый параметр со значением как у aggregationUnitCapacity
+                        "sntins": []  # Пока пустой список, заполним позже
+                    })
+                # Удалено: больше не обрабатываем коды level 2
+        
+        # Распределяем коды маркировки level 0 по единицам уровня 1
+        if marking_codes and selected_level1_units:
+            codes_per_unit = len(marking_codes) // len(selected_level1_units)
+            remainder = len(marking_codes) % len(selected_level1_units)
+            
+            start_idx = 0
+            for i, unit in enumerate(selected_level1_units):
+                # Количество кодов для этой единицы
+                unit_codes_count = codes_per_unit + (1 if i < remainder else 0)
+                end_idx = min(start_idx + unit_codes_count, len(marking_codes))
+                
+                # Добавляем коды в эту единицу
+                unit["sntins"] = marking_codes[start_idx:end_idx]
+                
+                # Обновляем емкость упаковки равной фактическому количеству кодов
+                unit["aggregationUnitCapacity"] = len(unit["sntins"])
+                # Обновляем количество агрегированных товаров равным емкости упаковки
+                unit["aggregatedItemsCount"] = unit["aggregationUnitCapacity"]
+                
+                start_idx = end_idx
+        
+        # Удалено: больше не распределяем коды level 1 по level 2
+        
+        # Объединяем единицы
+        aggregation_units = selected_level1_units
+        
+        # Получаем идентификатор производственной линии из текстового поля
+        productionLineId = self.production_line_input.text().strip()
+        logging.getLogger(__name__).info(f"Указана производственная линия: {productionLineId}")
+        
+        # Получаем идентификатор производственного заказа из текстового поля
+        productionOrderId = self.production_order_input.text().strip()
+        logging.getLogger(__name__).info(f"Указан производственный заказ: {productionOrderId}")
+            
+        # Формируем данные отчета об агрегации
+        report_data = {
+            "participantId": innId,  # Используем ИНН в качестве значения
+            "productionLineId": productionLineId,  # Идентификатор производственной линии
+            "productionOrderId": productionOrderId,  # Идентификатор производственного заказа
+            "aggregationUnits": aggregation_units,
+            "omsId": omsId,  # Добавляем omsId в отчет
+            "file_id": self.file_id  # Добавляем file_id для отслеживания в контроллере
+        }
+        
+        # Если не удалось получить omsId, показываем предупреждение пользователю
+        if not omsId:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self,
+                "Предупреждение",
+                "Не удалось получить идентификатор СУЗ (omsId). Отчет может быть отклонен API. "
+                "Проверьте настройки учетных данных."
+            )
+            logging.getLogger(__name__).warning("omsId не был добавлен в отчет об агрегации")
+            
+        # Если не удалось получить ИНН, показываем предупреждение пользователю
+        if not innId:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self,
+                "Предупреждение",
+                "Не удалось получить ИНН производителя (participantId). Отчет будет отклонен API. "
+                "Проверьте настройки учетных данных и добавьте ИНН."
+            )
+            logging.getLogger(__name__).warning("ИНН не был добавлен в отчет об агрегации")
+        
+        # Если не указан идентификатор производственной линии, показываем предупреждение
+        if not productionLineId:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self,
+                "Предупреждение",
+                "Не указан идентификатор производственной линии (productionLineId). "
+                "Отчет может быть отклонен API."
+            )
+            logging.getLogger(__name__).warning("productionLineId не был добавлен в отчет об агрегации")
+        
+        # Если не указан идентификатор производственного заказа, показываем предупреждение
+        if not productionOrderId:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self,
+                "Предупреждение",
+                "Не указан идентификатор производственного заказа (productionOrderId). "
+                "Отчет может быть отклонен API."
+            )
+            logging.getLogger(__name__).warning("productionOrderId не был добавлен в отчет об агрегации")
+        
+        return report_data
+        
+    def normalize_code(self, code):
+        """Преобразование символов [GS] в коде маркировки в правильный формат
+        
+        Args:
+            code (str): Код маркировки со строковым представлением [GS]
+            
+        Returns:
+            str: Код с правильным представлением разделителя групп
+        """
+        if not code:
+            return code
+            
+        # Логирование для отладки
+        logger = logging.getLogger(__name__)
+        logger.info(f"Нормализация кода: '{code}'")
+        logger.info(f"Длина кода: {len(code)}")
+        logger.info(f"Байтовое представление: {code.encode('utf-8')}")
+        logger.info(f"Unicode коды символов: {[ord(c) for c in code]}")
+        
+        # Проверяем наличие [GS] в текстовом виде
+        if '[GS]' in code:
+            normalized_code = code.split('[GS]')[0]
+            logger.info(f"Найден [GS] в текстовом виде")
+            logger.info(f"Нормализованный код: {normalized_code}")
+            return normalized_code
+            
+        # Проверяем наличие символа GS в Unicode
+        if '\u001d' in code:
+            normalized_code = code.split('\u001d')[0]
+            logger.info(f"Найден \u001d (Unicode GS)")
+            logger.info(f"Нормализованный код: {normalized_code}")
+            return normalized_code
+            
+        # Проверяем наличие символа GS в hex
+        if '\x1d' in code:
+            normalized_code = code.split('\x1d')[0]
+            logger.info(f"Найден \x1d (hex GS)")
+            logger.info(f"Нормализованный код: {normalized_code}")
+            return normalized_code
+            
+        # Проверяем все возможные представления GS в байтах
+        code_bytes = code.encode('utf-8')
+        for i in range(len(code_bytes)):
+            if code_bytes[i] == 0x1d:  # GS в hex
+                normalized_code = code_bytes[:i].decode('utf-8')
+                logger.info(f"Найден GS в позиции {i} (байт {code_bytes[i]})")
+                logger.info(f"Нормализованный код: {normalized_code}")
+                return normalized_code
+                
+        logger.info("GS символ не найден в коде")
+        return code

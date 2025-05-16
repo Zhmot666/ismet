@@ -131,6 +131,22 @@ class CredentialsDialog(BaseDialog):
         gln_layout.addWidget(self.gln_input)
         layout.addLayout(gln_layout)
         
+        # Поле для ИНН
+        inn_layout = QHBoxLayout()
+        inn_label = QLabel("ИНН (participantId):")
+        self.inn_input = QLineEdit()
+        if self.credentials:
+            # Проверяем, является ли credentials словарем
+            if isinstance(self.credentials, dict):
+                # Если это словарь, используем метод get для безопасного доступа к ключам
+                self.inn_input.setText(self.credentials.get('inn', ''))
+            else:
+                # Если это объект, то используем атрибуты
+                self.inn_input.setText(self.credentials.inn)
+        inn_layout.addWidget(inn_label)
+        inn_layout.addWidget(self.inn_input)
+        layout.addLayout(inn_layout)
+        
         # Кнопки
         buttons_layout = QHBoxLayout()
         save_button = QPushButton("Сохранить")
@@ -148,7 +164,8 @@ class CredentialsDialog(BaseDialog):
         return {
             'omsid': self.omsid_input.text(),
             'token': self.token_input.text(),
-            'gln': self.gln_input.text()
+            'gln': self.gln_input.text(),
+            'inn': self.inn_input.text()
         }
 
 class NomenclatureDialog(BaseDialog):

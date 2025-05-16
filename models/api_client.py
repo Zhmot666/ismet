@@ -1,8 +1,9 @@
 import requests
 import json
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 import logging
 from datetime import datetime
+from copy import deepcopy
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +164,7 @@ class APIClient:
         
         return {
             'Accept': 'application/json',
-            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+            'Content-Type': 'application/json;charset=UTF-8',
             'clientToken': client_token
         }
     
@@ -178,8 +179,8 @@ class APIClient:
                 if hasattr(response.request, 'headers'):
                     request_data['headers'] = dict(response.request.headers)
                 
-                request_str = json.dumps(request_data)
-                response_str = json.dumps(response.json()) if response.content else "{}"
+                request_str = json.dumps(request_data, ensure_ascii=False)
+                response_str = json.dumps(response.json(), ensure_ascii=False) if response.content else "{}"
                 status_code = response.status_code
                 success = 200 <= status_code < 300  # Успешный ответ, если код 2xx
                 
@@ -485,13 +486,123 @@ class APIClient:
         self.log_request("POST", url, data, response)
         return response.json()
     
-    def post_aggregation(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Отправка агрегации"""
-        url = f"{self.base_url}/api/v2/{self.extension}/aggregation"
+    def post_aggregation(self, data: Dict[str, Any], custom_extension: str = None) -> Dict[str, Any]:
+        """Отправка отчета об агрегации КМ
+        
+        Формирует и отправляет отчет об агрегации:
+        {
+            "participantId": "ИНН производителя",
+            "productionLineId": "Идентификатор производственной линии",
+            "productionOrderId": "Идентификатор производственного заказа",
+            "aggregationUnits": [
+                {
+                    "unitSerialNumber": "Серийный номер единицы агрегации",
+                    "aggregationType": "Тип агрегации (AGGREGATION_BOX, AGGREGATION_PALLET и др)",
+                    "aggregationUnitCapacity": 20,  # Емкость упаковки
+                    "aggregatedItemsCount": 20,     # Количество агрегированных товаров
+                    "sntins": ["код1", "код2", ...]  # Списки кодов, включенных в эту единицу агрегации
+                },
+                ...
+            ],
+        }
+        """
+        # Проверяем наличие всех необходимых полей
+        if not data or not isinstance(data, dict):
+            raise ValueError("Неверный формат данных для отчета об агрегации")
+            
+        if 'participantId' not in data or not data['participantId']:
+            logger.warning("Не указан participantId (ИНН) для отчета об агрегации")
+            
+        if 'aggregationUnits' not in data or not data['aggregationUnits']:
+            raise ValueError("Не указаны единицы агрегации (aggregationUnits) для отчета об агрегации")
+        
+        # Проверяем наличие productionLineId 
+        if 'productionLineId' not in data or not data['productionLineId']:
+            logger.warning("Не указан productionLineId (идентификатор производственной линии) для отчета об агрегации")
+            
+        # Проверяем наличие productionOrderId
+        if 'productionOrderId' not in data or not data['productionOrderId']:
+            logger.warning("Не указан productionOrderId (идентификатор производственного заказа) для отчета об агрегации")
+            
+        # Подготавливаем url API
+        api_extension = custom_extension or self.extension
+        extension_prefix = f"{api_extension}/" if api_extension else ""
+        
+        if 'omsId' in data and data['omsId']:
+            oms_id = data['omsId']
+            url = f"{self.base_url}/api/v2/{extension_prefix}aggregation?omsId={oms_id}"
+        else:
+            url = f"{self.base_url}/api/v2/{extension_prefix}aggregation"
+            
+        # Делаем копию данных, чтобы не изменять оригинал
+        request_data = deepcopy(data)
+        
+        # Удаляем поля, которые не нужны для API
+        if 'omsId' in request_data:
+            del request_data['omsId']
+        
+        if 'file_id' in request_data:
+            del request_data['file_id']
+        
+        # Проверяем и нормализуем aggregationUnits
+        for i, unit in enumerate(request_data['aggregationUnits']):
+            # Проверяем наличие обязательных полей
+            if 'unitSerialNumber' not in unit or not unit['unitSerialNumber']:
+                raise ValueError(f"Не указан серийный номер единицы (unitSerialNumber) для единицы агрегации #{i+1}")
+                
+            if 'aggregationType' not in unit or not unit['aggregationType']:
+                logger.warning(f"Не указан тип агрегации (aggregationType) для единицы #{i+1}, устанавливаем AGGREGATION")
+                unit['aggregationType'] = "AGGREGATION"
+                
+            # Проверяем допустимость типа агрегации
+            allowed_aggregation_types = ["AGGREGATION", "AGGREGATION_BOX", "AGGREGATION_PALLET", "AGGREGATION_CONTAINER"]
+            if unit["aggregationType"] not in allowed_aggregation_types:
+                error_msg = f"Недопустимый тип агрегации для единицы #{i+1}: {unit['aggregationType']}. Допустимые значения: {', '.join(allowed_aggregation_types)}"
+                logger.error(error_msg)
+                # Автоматически исправляем на допустимое значение
+                logger.warning(f"Автоматическая замена типа агрегации на AGGREGATION")
+                unit["aggregationType"] = "AGGREGATION"  # Всегда используем AGGREGATION
+                
+            # Проверяем наличие и валидность sntins
+            if 'sntins' not in unit or not isinstance(unit['sntins'], list):
+                logger.warning(f"Не указаны коды маркировки (sntins) для единицы #{i+1}")
+                unit['sntins'] = []
+                
+            # Нормализуем коды маркировки
+            unit['sntins'] = self.normalize_codes(unit['sntins'])
+                
+            # Проверяем соответствие емкости упаковки и количества кодов
+            if 'aggregationUnitCapacity' not in unit or not isinstance(unit['aggregationUnitCapacity'], int):
+                logger.warning(f"Не указана емкость упаковки (aggregationUnitCapacity) для единицы #{i+1}")
+                # Устанавливаем емкость равной количеству кодов маркировки
+                unit['aggregationUnitCapacity'] = len(unit['sntins'])
+            elif unit['aggregationUnitCapacity'] != len(unit['sntins']):
+                logger.warning(f"Емкость упаковки ({unit['aggregationUnitCapacity']}) не соответствует количеству кодов маркировки ({len(unit['sntins'])}) для единицы #{i+1}. Исправляем.")
+                unit['aggregationUnitCapacity'] = len(unit['sntins'])
+            
+            # Добавляем параметр aggregatedItemsCount с таким же значением как и aggregationUnitCapacity
+            unit['aggregatedItemsCount'] = unit['aggregationUnitCapacity']
+        
+        # Отправляем запрос
         headers = self.get_headers()
-        response = self.session.post(url, json=data, headers=headers)
-        self.log_request("POST", url, data, response)
-        return response.json()
+        headers['Content-Type'] = 'application/json;charset=UTF-8'
+        
+        # Напрямую используем json параметр для корректной сериализации
+        success, response_data, status_code = self.request(
+            method="POST", 
+            url=url, 
+            data=request_data,  # Будет автоматически сериализовано функцией request
+            headers=headers, 
+            description="Отправка отчета об агрегации"
+        )
+        
+        # Если статус успешный, возвращаем ответ с индикатором успеха
+        if 200 <= status_code < 300:
+            response_data['success'] = True
+        else:
+            response_data['success'] = False
+            
+        return response_data
     
     def post_utilisation(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Отправка данных об использовании (нанесении) КМ
@@ -608,62 +719,57 @@ class APIClient:
             # Логируем запрос для отладки
             logger.debug(f"Отправляемые данные: {data_copy}")
             
-            # Отправляем запрос с обновленными данными (без omsId в теле)
-            response = self.session.post(url, json=data_copy, headers=headers)
+            # Отправляем запрос с обновленными данными (без omsId в теле) через метод request
+            headers['Content-Type'] = 'application/json;charset=UTF-8'
+            success, response_data, status_code = self.request(
+                method="POST", 
+                url=url, 
+                data=data_copy, 
+                headers=headers, 
+                description="Отправка отчета о нанесении кодов маркировки"
+            )
             
             # Логируем ответ для отладки
-            logger.info(f"Получен ответ от сервера. Статус: {response.status_code}")
-            if response.content:
-                try:
-                    response_data = response.json()
-                    logger.info(f"Тело ответа: {response_data}")
-                    
-                    # Логирование ошибок валидации полей
-                    if "fieldErrors" in response_data:
-                        for field_error in response_data["fieldErrors"]:
-                            logger.error(f"Ошибка валидации поля '{field_error.get('fieldName')}': {field_error.get('fieldError')}")
-                            
-                except Exception:
-                    logger.info(f"Тело ответа не является JSON: {response.text[:200]}")
-            
-            # Логируем запрос в БД с более информативным описанием
-            description = "Отправка отчета о нанесении кодов маркировки"
-            self.log_request("POST", url, data_copy, response, description)
-            
-            # Проверяем наличие ошибок в ответе
-            json_response = response.json()
+            logger.info(f"Получен ответ от сервера. Статус: {status_code}")
+            if response_data:
+                logger.info(f"Тело ответа: {response_data}")
+                
+                # Логирование ошибок валидации полей
+                if "fieldErrors" in response_data:
+                    for field_error in response_data["fieldErrors"]:
+                        logger.error(f"Ошибка валидации поля '{field_error.get('fieldName')}': {field_error.get('fieldError')}")
             
             # Проверяем успешность отправки отчета (особая обработка для отчетов о нанесении)
             # Успешный ответ содержит omsId и reportId, а не поле success
-            if ("omsId" in json_response and "reportId" in json_response):
+            if ("omsId" in response_data and "reportId" in response_data):
                 # Это успешный ответ при отправке отчета о нанесении
-                logger.info(f"Отчет о нанесении успешно отправлен. OMS ID: {json_response['omsId']}, Report ID: {json_response['reportId']}")
+                logger.info(f"Отчет о нанесении успешно отправлен. OMS ID: {response_data['omsId']}, Report ID: {response_data['reportId']}")
                 # Добавляем флаг success для унификации обработки
-                json_response["success"] = True
-                return json_response
+                response_data["success"] = True
+                return response_data
             
-            if not response.ok or not json_response.get("success", False):
+            if status_code >= 400 or not response_data.get("success", False):
                 error_message = "Ошибка при отправке отчета о нанесении: "
-                if "fieldErrors" in json_response:
+                if "fieldErrors" in response_data:
                     field_errors = []
-                    for field_error in json_response["fieldErrors"]:
+                    for field_error in response_data["fieldErrors"]:
                         field_errors.append(f"{field_error.get('fieldName')}: {field_error.get('fieldError')}")
                     error_message += ", ".join(field_errors)
-                elif "globalErrors" in json_response:
-                    error_message += ", ".join(json_response["globalErrors"])
-                elif "error" in json_response:
-                    if isinstance(json_response["error"], dict):
-                        error_message += json_response["error"].get("message", "Неизвестная ошибка")
+                elif "globalErrors" in response_data:
+                    error_message += ", ".join(response_data["globalErrors"])
+                elif "error" in response_data:
+                    if isinstance(response_data["error"], dict):
+                        error_message += response_data["error"].get("message", "Неизвестная ошибка")
                     else:
-                        error_message += str(json_response["error"])
+                        error_message += str(response_data["error"])
                 else:
-                    error_message += f"Код ответа {response.status_code}"
+                    error_message += f"Код ответа {status_code}"
                 
                 logger.warning(error_message)
             else:
                 logger.info("Отчет о нанесении успешно отправлен")
             
-            return json_response
+            return response_data
             
         except requests.RequestException as e:
             error_message = f"Ошибка соединения при отправке отчета о нанесении: {str(e)}"
@@ -763,55 +869,47 @@ class APIClient:
         # Для заказов используем Content-Type: application/json
         headers['Content-Type'] = 'application/json;charset=UTF-8'
         
-        # Формируем тело запроса для создания заказа
-        request_body = {
-            "products": order_data["products"],
-            "factoryId": order_data["factoryId"],
-            "releaseMethodType": order_data["releaseMethodType"],
-            "factoryCountry": order_data["factoryCountry"]
-        }
-        
         # Логирование заголовков запроса для диагностики
         logger.info(f"Отправка заказа на эмиссию. URL: {url}")
         logger.info(f"Заголовки запроса: {headers}")
-        logger.info(f"Данные заказа: {request_body}")
+        logger.info(f"Данные заказа: {order_data}")
         
         try:
-            response = self.session.post(url, json=request_body, headers=headers)
+            # Используем метод request вместо прямого вызова session.post
+            success, response_data, status_code = self.request(
+                method="POST", 
+                url=url, 
+                data=order_data, 
+                headers=headers, 
+                description="Создание заказа на эмиссию кодов маркировки"
+            )
             
             # Логируем ответ для диагностики
-            logger.info(f"Получен ответ от сервера. Статус: {response.status_code}")
-            if response.content:
-                try:
-                    logger.info(f"Тело ответа: {response.json()}")
-                except Exception:
-                    logger.info(f"Тело ответа не является JSON: {response.text[:200]}")
-            
-            # Логируем запрос в БД
-            self.log_request("POST", url, request_body, response)
+            logger.info(f"Получен ответ от сервера. Статус: {status_code}")
+            if response_data:
+                logger.info(f"Тело ответа: {response_data}")
             
             # Проверяем наличие ошибок в ответе
-            json_response = response.json()
-            if not response.ok or not json_response.get("success", False):
+            if status_code >= 400 or not response_data.get("success", False):
                 error_message = "Ошибка при создании заказа: "
-                if "globalErrors" in json_response:
-                    error_message += ", ".join(json_response["globalErrors"])
-                elif "error" in json_response:
-                    if isinstance(json_response["error"], dict):
-                        error_message += json_response["error"].get("message", "Неизвестная ошибка")
+                if "globalErrors" in response_data:
+                    error_message += ", ".join(response_data["globalErrors"])
+                elif "error" in response_data:
+                    if isinstance(response_data["error"], dict):
+                        error_message += response_data["error"].get("message", "Неизвестная ошибка")
                     else:
-                        error_message += str(json_response["error"])
+                        error_message += str(response_data["error"])
                 else:
-                    error_message += f"Код ответа {response.status_code}"
+                    error_message += f"Код ответа {status_code}"
                 
                 logger.warning(error_message)
             
-            return json_response
+            return response_data
             
         except requests.RequestException as e:
             error_message = f"Ошибка соединения при создании заказа: {str(e)}"
             logger.error(error_message)
-            self.log_request("POST", url, request_body, None)
+            self.log_request("POST", url, order_data, None)
             raise
 
     def get_codes_from_order(self, order_id: str, gtin: str, quantity: int, last_block_id: Optional[str] = None) -> Dict[str, Any]:
@@ -954,14 +1052,39 @@ class APIClient:
         
         try:
             # Выполнение запроса
-            response = self.session.request(
-                method=method,
-                url=url,
-                data=data,
-                headers=request_headers,
-                params=params,
-                timeout=timeout
-            )
+            # Проверяем наличие Content-Type и используем соответствующий параметр для запроса
+            is_json = request_headers.get('Content-Type', '').startswith('application/json')
+            
+            if method.upper() in ['POST', 'PUT', 'PATCH'] and is_json and isinstance(data, str):
+                # Если данные уже сериализованы в строку JSON и заголовок соответствует
+                response = self.session.request(
+                    method=method,
+                    url=url,
+                    data=data,
+                    headers=request_headers,
+                    params=params,
+                    timeout=timeout
+                )
+            elif method.upper() in ['POST', 'PUT', 'PATCH'] and is_json and data is not None:
+                # Если это JSON запрос, но данные ещё не сериализованы
+                response = self.session.request(
+                    method=method,
+                    url=url,
+                    json=data,  # Используем json параметр для автоматической сериализации
+                    headers=request_headers,
+                    params=params,
+                    timeout=timeout
+                )
+            else:
+                # Для всех остальных случаев
+                response = self.session.request(
+                    method=method,
+                    url=url,
+                    data=data,
+                    headers=request_headers,
+                    params=params,
+                    timeout=timeout
+                )
             
             # Логирование запроса в базу данных
             if self.db:
@@ -1033,7 +1156,11 @@ class APIClient:
         Returns:
             Tuple[Dict, int]: Ответ сервера и код ответа
         """
-        success, response_data, status_code = self.request("POST", url, data=data, params=params, headers=headers, description=description)
+        # Сериализуем данные в JSON перед отправкой
+        import json
+        json_data = json.dumps(data)
+        
+        success, response_data, status_code = self.request("POST", url, data=json_data, params=params, headers=headers, description=description)
         return response_data, status_code
     
     def put(self, url: str, data: Dict, params: Optional[Dict] = None, 
@@ -1051,7 +1178,12 @@ class APIClient:
         Returns:
             Tuple[Dict, int]: Ответ сервера и код ответа
         """
-        success, response_data, status_code = self.request("PUT", url, data=data, params=params, headers=headers, description=description)
+        # Проверяем Content-Type и используем json параметр для JSON-данных
+        if headers and headers.get('Content-Type', '').startswith('application/json'):
+            success, response_data, status_code = self.request("PUT", url, data=data, params=params, headers=headers, description=description)
+        else:
+            # Обычная отправка данных
+            success, response_data, status_code = self.request("PUT", url, data=data, params=params, headers=headers, description=description)
         return response_data, status_code
     
     def delete(self, url: str, data: Optional[Dict] = None, params: Optional[Dict] = None, 
@@ -1069,5 +1201,73 @@ class APIClient:
         Returns:
             Tuple[Dict, int]: Ответ сервера и код ответа
         """
-        success, response_data, status_code = self.request("DELETE", url, data=data, params=params, headers=headers, description=description)
-        return response_data, status_code 
+        # Проверяем Content-Type и используем json параметр для JSON-данных
+        if headers and headers.get('Content-Type', '').startswith('application/json') and data:
+            success, response_data, status_code = self.request("DELETE", url, data=data, params=params, headers=headers, description=description)
+        else:
+            # Обычная отправка данных
+            success, response_data, status_code = self.request("DELETE", url, data=data, params=params, headers=headers, description=description)
+        return response_data, status_code
+
+    def normalize_codes(self, codes: List[str]) -> List[str]:
+        """Нормализует коды маркировки, оставляя только часть до первого [GS]
+        
+        Args:
+            codes (List[str]): Список кодов маркировки
+            
+        Returns:
+            List[str]: Список нормализованных кодов
+        """
+        if not codes:
+            return []
+            
+        normalized_codes = []
+        for code in codes:
+            if not code:
+                continue
+                
+            # Отладочное логирование для анализа строки
+            logger.info(f"Обработка кода: {code}")
+            logger.info(f"Длина кода: {len(code)}")
+            logger.info(f"Байтовое представление: {code.encode('utf-8')}")
+            logger.info(f"Unicode коды символов: {[ord(c) for c in code]}")
+            
+            # Получаем только часть строки до первого [GS]
+            # Вариант с символьным представлением [GS]
+            if '[GS]' in code:
+                normalized_code = code.split('[GS]')[0]
+                logger.info(f"Найден [GS] в текстовом виде")
+            # Вариант с Unicode символом GS (Group Separator)
+            elif '\u001d' in code:
+                normalized_code = code.split('\u001d')[0]
+                logger.info(f"Найден \u001d (Unicode GS)")
+            # Вариант с другим представлением GS в Unicode
+            elif '\x1d' in code:
+                normalized_code = code.split('\x1d')[0]
+                logger.info(f"Найден \x1d (hex GS)")
+            # Проверяем все возможные представления GS в Unicode
+            else:
+                # Преобразуем строку в байты для поиска всех возможных представлений GS
+                code_bytes = code.encode('utf-8')
+                gs_positions = []
+                
+                # Ищем все возможные представления GS
+                for i in range(len(code_bytes)):
+                    if code_bytes[i] == 0x1d:  # GS в hex
+                        gs_positions.append(i)
+                        logger.info(f"Найден GS в позиции {i} (байт {code_bytes[i]})")
+                
+                if gs_positions:
+                    # Берем позицию первого GS
+                    first_gs_pos = gs_positions[0]
+                    # Преобразуем обратно в строку до первого GS
+                    normalized_code = code_bytes[:first_gs_pos].decode('utf-8')
+                    logger.info(f"Нормализован код маркировки: оставлена часть до GS символа (bytes)")
+                else:
+                    normalized_code = code
+                    logger.info("GS символ не найден в коде")
+                
+            logger.info(f"Нормализованный код: {normalized_code}")
+            normalized_codes.append(normalized_code)
+            
+        return normalized_codes

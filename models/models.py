@@ -22,11 +22,12 @@ class Connection:
 
 class Credentials:
     """Класс для представления учетных данных"""
-    def __init__(self, id, omsid, token, gln=""):
+    def __init__(self, id, omsid, token, gln="", inn=""):
         self.id = id
         self.omsid = omsid
         self.token = token
         self.gln = gln
+        self.inn = inn
 
 class Nomenclature:
     """Класс для представления номенклатуры"""

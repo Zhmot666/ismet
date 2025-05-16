@@ -162,6 +162,7 @@ class MainController(QObject):
         self.view.send_utilisation_report_signal.connect(self.send_utilisation_report)
         self.view.check_report_status_signal.connect(self.check_report_status)
         self.view.check_aggregation_status_signal.connect(self.check_aggregation_status)
+        self.view.send_aggregation_report_signal.connect(self.send_aggregation_report)
     
     def load_all_data(self):
         """Загрузка всех данных из базы данных"""
@@ -583,27 +584,32 @@ class MainController(QObject):
             self.view.show_message("Ошибка", f"Ошибка при установке активного подключения: {str(e)}")
     
     # Методы для работы с учетными данными
-    def add_credentials(self, omsid, token, gln, connection_id):
-        """Добавление новых учетных данных"""
+    def add_credentials(self, omsid, token, gln, inn, connection_id=None):
+        """Добавление учетных данных"""
         try:
-            # Сохранение в базу данных
-            self.db.add_credentials(omsid=omsid, token=token, gln=gln, connection_id=connection_id)
-            logger.info(f"Учетные данные для {omsid} сохранены в базе данных")
+            credentials = self.db.add_credentials(omsid, token, gln, inn, connection_id)
             
-            # Обновление интерфейса
+            # Обновляем настройки API-клиента
+            self.update_api_client_settings()
+            
+            # Перезагружаем учетные данные
             self.load_credentials()
-            
+            self.view.show_message("Учетные данные добавлены", "Учетные данные успешно добавлены")
         except Exception as e:
             logger.error(f"Ошибка при добавлении учетных данных: {str(e)}")
             self.view.show_message("Ошибка", f"Ошибка при добавлении учетных данных: {str(e)}")
     
-    def edit_credentials(self, credentials_id, omsid, token, gln):
+    def edit_credentials(self, credentials_id, omsid, token, gln, inn):
         """Редактирование учетных данных"""
         try:
-            credentials = self.db.update_credentials(credentials_id, omsid, token, gln)
-            logger.info(f"Учетные данные {credentials_id} обновлены")
+            self.db.update_credentials(credentials_id, omsid, token, gln, inn)
+            
+            # Обновляем настройки API-клиента
+            self.update_api_client_settings()
+            
+            # Перезагружаем учетные данные
             self.load_credentials()
-            self.view.show_message("Успех", "Учетные данные успешно обновлены")
+            self.view.show_message("Учетные данные обновлены", "Учетные данные успешно обновлены")
         except Exception as e:
             logger.error(f"Ошибка при обновлении учетных данных: {str(e)}")
             self.view.show_message("Ошибка", f"Ошибка при обновлении учетных данных: {str(e)}")
@@ -2257,6 +2263,90 @@ class MainController(QObject):
             logger.error(f"Ошибка при отправке отчета: {str(e)}")
             self.view.show_message("Ошибка", f"Не удалось отправить отчет: {str(e)}")
 
+    def send_aggregation_report(self, report_data):
+        """Отправка отчета об агрегации
+        
+        Args:
+            report_data (dict): Данные для отчета об агрегации
+        """
+        try:
+            # Проверяем наличие API-клиента
+            if not hasattr(self, 'api_client') or not self.api_client:
+                self.view.show_message("Ошибка", "API-клиент не настроен. Добавьте подключение и учетные данные.")
+                return
+            
+            # Логируем данные отчета
+            logger.info(f"Отправка отчета об агрегации с {len(report_data.get('aggregationUnits', []))} единицами агрегации")
+            
+            # Проверка наличия ИНН (participantId)
+            if not report_data.get('participantId'):
+                logger.warning("В отчете отсутствует participantId (ИНН). Отчет будет отклонен API.")
+                self.view.show_message("Предупреждение", 
+                                      "В отчете отсутствует ИНН производителя (participantId). "
+                                      "Добавьте ИНН в настройках учетных данных.")
+            
+            # Проверяем соответствие емкости упаковки количеству кодов
+            for i, unit in enumerate(report_data.get('aggregationUnits', [])):
+                unit_capacity = unit.get('aggregationUnitCapacity', 0)
+                sntins_count = len(unit.get('sntins', []))
+                if unit_capacity != sntins_count:
+                    logger.warning(f"Емкость упаковки ({unit_capacity}) не соответствует количеству кодов маркировки ({sntins_count}) в единице #{i+1}")
+                    unit['aggregationUnitCapacity'] = sntins_count
+                    logger.info(f"Обновлена емкость упаковки для единицы #{i+1}: {sntins_count}")
+            
+            # Отправка отчета через API-клиент
+            response = self.api_client.post_aggregation(report_data)
+            
+            if response and response.get('success', False):
+                # Обновляем ID отчета в таблице aggregation_files
+                file_id = int(report_data.get('file_id', 0))
+                if file_id > 0 and 'reportId' in response:
+                    aggregation_report_id = response['reportId']
+                    self.db.update_aggregation_file_aggregation_report_id(file_id, aggregation_report_id)
+                    
+                    # Устанавливаем статус отчета "Отправлен"
+                    self.db.update_aggregation_file_aggregation_status(file_id, ReportStatus.SENT)
+                    
+                    logger.info(f"Обновлен ID отчета агрегации для файла #{file_id}: {aggregation_report_id}")
+                    self.load_aggregation_files()  # Обновляем таблицу файлов агрегации
+                
+                # Отображаем сообщение с информацией о reportId
+                if 'reportId' in response:
+                    self.view.show_message(
+                        "Успех", 
+                        f"Отчет об агрегации успешно отправлен!\nИдентификатор отчета: {response['reportId']}"
+                    )
+                else:
+                    self.view.show_message("Успех", "Отчет об агрегации успешно отправлен!")
+                    
+                return response
+            else:
+                error_message = "Ошибка при отправке отчета об агрегации"
+                if 'fieldErrors' in response:
+                    field_errors = []
+                    for field_error in response['fieldErrors']:
+                        field_errors.append(f"{field_error.get('fieldName')}: {field_error.get('fieldError')}")
+                    error_message += ": " + ", ".join(field_errors)
+                elif 'globalErrors' in response:
+                    error_message += ": " + ", ".join(response['globalErrors'])
+                elif 'error' in response:
+                    if isinstance(response['error'], dict):
+                        error_message = f"{error_message}: {response['error'].get('message', 'Неизвестная ошибка')}"
+                    else:
+                        error_message = f"{error_message}: {response['error']}"
+                else:
+                    error_message = f"{error_message}: Отсутствует успешный ответ от API"
+                
+                logger.error(error_message)
+                self.view.show_message("Ошибка", error_message)
+                return response
+                
+        except Exception as e:
+            logger.error(f"Исключение при отправке отчета об агрегации: {str(e)}")
+            logger.exception("Подробная трассировка ошибки:")
+            self.view.show_message("Ошибка", f"Ошибка при отправке отчета об агрегации: {str(e)}")
+            return {"success": False, "error": str(e)}
+
     # Методы для работы с типами использования кодов маркировки
     def load_usage_types(self):
         """Загрузка типов использования кодов маркировки из базы данных"""
@@ -2454,8 +2544,11 @@ class MainController(QObject):
             report_id (str): Идентификатор отчета для проверки
         """
         try:
+            logger.info(f"Начало проверки статуса отчета маркировки. file_id={file_id}, report_id={report_id}")
+            
             # Проверяем наличие данных
             if not report_id:
+                logger.warning("Отсутствует идентификатор отчета")
                 self.view.show_message("Ошибка", "Отсутствует идентификатор отчета")
                 return
             
@@ -2463,8 +2556,11 @@ class MainController(QObject):
             extension = self.api_client.extension
             omsid = self.api_client.omsid
             
+            logger.info(f"Получены параметры API: extension={extension}, omsid={omsid}")
+            
             # Формируем URL для запроса статуса отчета
             url = f"/api/v2/{extension}/report/info?omsId={omsid}&reportId={report_id}"
+            logger.info(f"Сформирован URL для запроса: {url}")
             
             # Выполняем запрос статуса отчета
             success, response, status_code = self.api_client.request(
@@ -2473,30 +2569,49 @@ class MainController(QObject):
                 description=f"Запрос статуса отчета о нанесении (reportId: {report_id})"
             )
             
+            logger.info(f"Получен ответ от API: success={success}, status_code={status_code}")
+            
             if not success:
-                self.view.show_message("Ошибка", f"Не удалось получить статус отчета: {response.get('error', 'Неизвестная ошибка')}")
+                error_msg = response.get('error', 'Неизвестная ошибка')
+                logger.error(f"Ошибка при запросе статуса: {error_msg}")
+                self.view.show_message("Ошибка", f"Не удалось получить статус отчета: {error_msg}")
                 return
             
             # Обрабатываем ответ
-            status = response.get("status")
+            status = response.get("status") or response.get("reportStatus")
+            logger.info(f"Получен статус отчета: {status}")
             
             # Обновляем статус отчета в базе данных
             if file_id and status:
                 status_text = self.get_report_status_text(status)
-                self.db.update_aggregation_file_status(file_id, status_text, report_id)
+                logger.info(f"Обновляем статус в БД: file_id={file_id}, status={status_text}")
+                self.db.update_aggregation_file_report_status(file_id, status_text)
                 
-                # Показываем уведомление пользователю
-                self.view.show_message("Статус отчета", f"Статус отчета: {status_text}")
+                # Показываем уведомление пользователю с подробной информацией
+                message = f"Статус отчета маркировки: {status_text}\n\n"
+                message += f"ID отчета: {report_id}\n"
+                message += f"ID файла: {file_id}\n"
+                
+                # Добавляем дополнительную информацию из ответа API, если она есть
+                if 'error' in response:
+                    message += f"\nОшибка: {response['error']}"
+                if 'message' in response:
+                    message += f"\nСообщение: {response['message']}"
+                
+                self.view.show_message("Статус отчета маркировки", message)
                 
                 # Обновляем список файлов агрегации
                 self.load_aggregation_files()
+            else:
+                self.view.show_message("Предупреждение", "Не удалось получить статус отчета маркировки")
             
             # Обновляем список логов API после запроса статуса
             self.load_api_logs()
             
         except Exception as e:
+            logger.error(f"Ошибка при проверке статуса отчета: {str(e)}", exc_info=True)
             self.view.show_message("Ошибка", f"Ошибка при проверке статуса отчета: {str(e)}")
-    
+
     def check_aggregation_status(self, file_id, aggregation_report_id):
         """Получение статуса обработки отчета агрегации
         
@@ -2508,8 +2623,11 @@ class MainController(QObject):
             aggregation_report_id (str): Идентификатор отчета агрегации для проверки
         """
         try:
+            logger.info(f"Начало проверки статуса отчета агрегации. file_id={file_id}, aggregation_report_id={aggregation_report_id}")
+            
             # Проверяем наличие данных
             if not aggregation_report_id:
+                logger.warning("Отсутствует идентификатор отчета агрегации")
                 self.view.show_message("Ошибка", "Отсутствует идентификатор отчета агрегации")
                 return
             
@@ -2517,8 +2635,11 @@ class MainController(QObject):
             extension = self.api_client.extension
             omsid = self.api_client.omsid
             
+            logger.info(f"Получены параметры API: extension={extension}, omsid={omsid}")
+            
             # Формируем URL для запроса статуса отчета агрегации
             url = f"/api/v2/{extension}/report/info?omsId={omsid}&reportId={aggregation_report_id}"
+            logger.info(f"Сформирован URL для запроса: {url}")
             
             # Выполняем запрос статуса отчета агрегации
             success, response, status_code = self.api_client.request(
@@ -2527,28 +2648,47 @@ class MainController(QObject):
                 description=f"Запрос статуса отчета агрегации (reportId: {aggregation_report_id})"
             )
             
+            logger.info(f"Получен ответ от API: success={success}, status_code={status_code}")
+            
             if not success:
-                self.view.show_message("Ошибка", f"Не удалось получить статус отчета агрегации: {response.get('error', 'Неизвестная ошибка')}")
+                error_msg = response.get('error', 'Неизвестная ошибка')
+                logger.error(f"Ошибка при запросе статуса: {error_msg}")
+                self.view.show_message("Ошибка", f"Не удалось получить статус отчета агрегации: {error_msg}")
                 return
             
             # Обрабатываем ответ
-            status = response.get("status")
+            status = response.get("status") or response.get("reportStatus")
+            logger.info(f"Получен статус отчета: {status}")
             
             # Обновляем статус отчета в базе данных
             if file_id and status:
                 status_text = self.get_report_status_text(status)
-                self.db.update_aggregation_file_aggr_status(file_id, status_text, aggregation_report_id)
+                logger.info(f"Обновляем статус в БД: file_id={file_id}, status={status_text}")
+                self.db.update_aggregation_file_aggregation_status(file_id, status_text)
                 
-                # Показываем уведомление пользователю
-                self.view.show_message("Статус отчета агрегации", f"Статус отчета агрегации: {status_text}")
+                # Показываем уведомление пользователю с подробной информацией
+                message = f"Статус отчета агрегации: {status_text}\n\n"
+                message += f"ID отчета: {aggregation_report_id}\n"
+                message += f"ID файла: {file_id}\n"
+                
+                # Добавляем дополнительную информацию из ответа API, если она есть
+                if 'error' in response:
+                    message += f"\nОшибка: {response['error']}"
+                if 'message' in response:
+                    message += f"\nСообщение: {response['message']}"
+                
+                self.view.show_message("Статус отчета агрегации", message)
                 
                 # Обновляем список файлов агрегации
                 self.load_aggregation_files()
+            else:
+                self.view.show_message("Предупреждение", "Не удалось получить статус отчета агрегации")
             
             # Обновляем список логов API после запроса статуса
             self.load_api_logs()
             
         except Exception as e:
+            logger.error(f"Ошибка при проверке статуса отчета агрегации: {str(e)}", exc_info=True)
             self.view.show_message("Ошибка", f"Ошибка при проверке статуса отчета агрегации: {str(e)}")
 
     def create_order(self, order_data):
